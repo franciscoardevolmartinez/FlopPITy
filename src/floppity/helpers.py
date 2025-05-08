@@ -255,3 +255,38 @@ def W2_distance(proposals, n_mc=100, n_draws=1000):
 
     w2=np.mean(emd_inter)
     w2_err=np.std(emd_inter)
+
+def find_best_fit(obs_dict, sim_dict):
+    """
+    Find the simulation with the lowest reduced chi-squared value 
+    for each observation.
+
+    Parameters
+    ----------
+    obs_dict : dict
+        Keys are observation names. Values are arrays of shape 
+        (n_points, ≥3) with columns: wavelength, observed spectrum, 
+        error.
+    sim_dict : dict
+        Keys are the same as obs_dict. Values are arrays of shape 
+        (n_samples, n_points), corresponding to simulated spectra.
+
+    Returns
+    -------
+    best_fit_dict : dict
+        Dictionary with the same keys as obs_dict. Values are tuples 
+        of the form (best_fit_index, best_fit_chi2), where:
+        - best_fit_index is the index of the simulation with the 
+          lowest chi-squared value.
+        - best_fit_chi2 is the corresponding reduced chi-squared 
+          value.
+    """
+    chi2_dict = reduced_chi_squared(obs_dict, sim_dict)
+    best_fit_dict = {}
+
+    for key, chi2_values in chi2_dict.items():
+        best_fit_index = np.argmin(chi2_values)
+        best_fit_chi2 = chi2_values[best_fit_index]
+        best_fit_dict[key] = (best_fit_index, best_fit_chi2)
+
+    return best_fit_dict

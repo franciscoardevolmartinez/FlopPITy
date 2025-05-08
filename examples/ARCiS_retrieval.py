@@ -1,11 +1,9 @@
-from floppity import flappity
-from floppity import helpers
+from floppity import Retrieval, helpers
 import numpy as np
 import torch
 import pickle
 from tqdm import trange
-from floppity.simulators import read_ARCiS_input
-from floppity.simulators import ARCiS
+from floppity.simulators import read_ARCiS_input, ARCiS
 
 if __name__ == "__main__":
     arcis_input='/Users/floppityflappity/input_j1828_free.dat'
@@ -31,7 +29,7 @@ if __name__ == "__main__":
         dropout=0.5
     )
 
-    R = flappity.Superclass(ARCiS)
+    R = Retrieval(ARCiS)
 
     R.parameters=pars
     R.get_obs(obs_list)
@@ -40,3 +38,5 @@ if __name__ == "__main__":
                     training_kwargs=training_kwargs, simulator_kwargs=ARCiS_kwargs, 
                     n_rounds=2, n_samples_init=10, n_samples=10
                     )
+    
+    R.save(ARCiS_kwargs['output_dir']+'retrieval.pkl')
