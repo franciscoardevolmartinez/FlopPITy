@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 from sbi import utils as utils
 from sbi.neural_nets import posterior_nn
 from sbi.inference import SNPE_C
@@ -8,6 +9,7 @@ from sbi.utils import RestrictedPrior, get_density_thresholder
 from floppity import postprocessing
 import multiprocessing as mp
 import cloudpickle as pickle
+from corner import corner
 
 class Retrieval():
     def __init__(self, simulator):
@@ -500,6 +502,46 @@ class Retrieval():
             combined_spectra[k] = np.vstack(combined_spectra[k])  # shape: (n_total, n_points)
 
         return combined_spectra
+
+    def plot_corner(self, proposal_id=-1, n_samples=1000, **CORNER_KWARGS):
+        """
+        Generates a corner plot for the posterior samples of a proposal distribution.
+
+        Parameters
+        ----------
+        proposal : object
+            The proposal distribution object. It should have a `sample` method 
+            that generates samples from the posterior.
+        n_samples : int
+            The number of samples to draw from the proposal distribution.
+        **CORNER_KWARGS : dict, optional
+            Additional keyword arguments to pass to the `corner.corner` function 
+            for customizing the plot.
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+            The matplotlib figure object containing the corner plot.
+
+        Notes
+        -----
+        - This function requires the `corner` library for generating the corner plot.
+        - The proposal distribution should return samples in a 2D array of shape 
+        (n_samples, n_parameters).
+        """
+
+        # Draw samples from the proposal distribution
+        samples = self.proposals[proposal_id].sample((n_samples,)).detach().numpy()
+
+        # Generate the corner plot
+        fig = corner(samples, 
+                        labels=list(self.parameters.keys()), 
+                        **CORNER_KWARGS)
+
+        # Show the plot
+        plt.show()
+
+        return fig
 
 def _run_single_chunk(args):
     """

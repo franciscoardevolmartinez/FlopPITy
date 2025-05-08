@@ -2,43 +2,7 @@ import corner
 import torch
 import matplotlib.pyplot as plt
 
-def plot_corner(proposal, n_samples=1000, **CORNER_KWARGS):
-    """
-    Generates a corner plot for the posterior samples of a proposal distribution.
 
-    Parameters
-    ----------
-    proposal : object
-        The proposal distribution object. It should have a `sample` method 
-        that generates samples from the posterior.
-    n_samples : int
-        The number of samples to draw from the proposal distribution.
-    **CORNER_KWARGS : dict, optional
-        Additional keyword arguments to pass to the `corner.corner` function 
-        for customizing the plot.
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-        The matplotlib figure object containing the corner plot.
-
-    Notes
-    -----
-    - This function requires the `corner` library for generating the corner plot.
-    - The proposal distribution should return samples in a 2D array of shape 
-      (n_samples, n_parameters).
-    """
-
-    # Draw samples from the proposal distribution
-    samples = proposal.sample((n_samples,)).detach().numpy()
-
-    # Generate the corner plot
-    fig = corner.corner(samples, **CORNER_KWARGS)
-
-    # Show the plot
-    plt.show()
-
-    return fig
 
 def plot_moment_evolution(distributions, end, compute_moments_fn, R=None, 
                             num_repeats=10, sample_size=10000):
