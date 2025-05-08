@@ -1,0 +1,32 @@
+[project]
+name = "FlopPITy"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Francisco Ardevol Martinez", email = "68873290+franciscoardevolmartinez@users.noreply.github.com" }
+]
+requires-python = ">=3.9"
+dependencies = [
+    "matplotlib>=3.9.4",
+    "numpy>=2.0.2",
+    "sbi",
+    "scipy",
+    "scikit-learn",
+    "torch"
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.5",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
