@@ -1,6 +1,0 @@
-matplotlib>=3.9.4
-numpy>=2.0.2
-sbi
-scipy
-scikit-learn
-torch
