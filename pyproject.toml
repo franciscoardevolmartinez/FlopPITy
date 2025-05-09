@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "setuptools_scm"]
+requires = ["setuptools>=75", "setuptools_scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,27 +7,18 @@ name = "FlopPITy"
 dynamic = ["version"]
 description = "normalising Flow exoPlanet Parameter Inference Toolkyt"
 readme = "README.md"
-license = {file = "LICENSE"}
+license = "BSD-3-Clause"
 authors = [
     { name = "Francisco Ardevol Martinez", email = "68873290+franciscoardevolmartinez@users.noreply.github.com" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
-    "matplotlib>=3.9.4",
-    "numpy>=2.0.2",
     "sbi",
-    "scipy",
-    "tqdm",
     "subprocess",
-    "scikit-learn",
-    "torch",
     "corner",
     "multiprocessing",
     "cloudpickle"
 ]
 
-[tool.setuptools]
-packages = ["floppity"]
-
 [tool.setuptools_scm]
-write_to = "floppity/version.py"
+write_to = "src/floppity/version.py"
