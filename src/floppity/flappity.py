@@ -534,7 +534,7 @@ class Retrieval():
         samples = self.proposals[proposal_id].sample((n_samples,)).detach().numpy()
 
         # Generate the corner plot
-        fig = corner(samples, 
+        fig = corner(helpers.convert_cube(samples, self.parameters), 
                         labels=list(self.parameters.keys()), 
                         **CORNER_KWARGS)
 

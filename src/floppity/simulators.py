@@ -29,9 +29,11 @@ def mock_simulator(obs, pars, thread=0):
             y -= a * np.exp(-0.5 * ((x - c) / (s)) ** 2)
         return y
 
-    c=pars[:,0:3]
-    s=pars[:,3:6]
-    a=pars[:,6:9]
+    ndims=pars.shape[1]
+
+    c=pars[:,0:ndims//3]
+    s=pars[:,ndims//3:2*ndims//3]
+    a=pars[:,2*ndims//3:3*ndims//3]
     
     x = {}
     for key in obs.keys():
