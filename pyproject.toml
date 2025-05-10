@@ -14,10 +14,9 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "sbi",
-    "subprocess",
     "corner",
-    "multiprocessing",
-    "cloudpickle"
+    "cloudpickle",
+    "geomloss"
 ]
 
 [tool.setuptools_scm]
