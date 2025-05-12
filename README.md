@@ -13,7 +13,7 @@ from floppity.simulators import read_ARCiS_input, ARCiS
 ```
 
 - Now you can initialize the retrieval class with a simulator.
-  A python wrapper for [ARCiS]([https://www.example.com](https://github.com/michielmin/ARCiS)) comes built-in (you need to install ARCiS on your own tho):
+  A python wrapper for [ARCiS](https://github.com/michielmin/ARCiS) comes built-in (you need to install ARCiS on your own tho):
   
 ```python
 R = Retrieval(ARCiS)
