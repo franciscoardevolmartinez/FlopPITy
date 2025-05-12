@@ -13,11 +13,11 @@ authors = [
 ]
 requires-python = ">=3.10"
 dependencies = [
+    "numpy",
     "sbi",
-    "subprocess",
     "corner",
-    "multiprocessing",
-    "cloudpickle"
+    "cloudpickle",
+    "geomloss"
 ]
 
 [tool.setuptools_scm]

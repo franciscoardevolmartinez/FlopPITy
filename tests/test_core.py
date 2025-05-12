@@ -2,9 +2,8 @@ import unittest
 import numpy as np
 import torch
 from torch.distributions import Normal
-from geomloss import SamplesLoss
 
-from helpers import (
+from floppity.helpers import (
     create_obs_file,
     convert_cube,
     compute_moments,

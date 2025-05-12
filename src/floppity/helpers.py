@@ -1,4 +1,7 @@
 import numpy as np
+from geomloss import SamplesLoss
+import torch
+
 
 def create_obs_file(wvl, spectrum, error, *args):
     """
@@ -138,7 +141,6 @@ def find_MAP(proposal):
                        show_progress_bars=True, force_update=False
                        )
 
-    import numpy as np
 
 def reduced_chi_squared(obs_dict, sim_dict, n_params=0):
     """
@@ -255,6 +257,8 @@ def W2_distance(proposals, n_mc=100, n_draws=1000):
 
     w2=np.mean(emd_inter)
     w2_err=np.std(emd_inter)
+
+    return w2, w2_err
 
 def find_best_fit(obs_dict, sim_dict):
     """
