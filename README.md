@@ -22,12 +22,12 @@ R = Retrieval(ARCiS)
 - Read in observations and define parameters to retrieve:
     
 ```python
-R.get_obs(['path/to/obs1', 'path/to/obs2'])
+R.get_obs(['path/to/obs_0', 'path/to/obs_1',..., 'path/to/obs_n'])
     
-R.add_parameter(par1, min, max)
-R.add_parameter(par2, min, max)
+R.add_parameter(par_0, min, max)
+R.add_parameter(par_1, min, max)
 ...
-R.add_parameter(parN, min, max)
+R.add_parameter(par_m, min, max)
 ```
 
 - For ARCiS, the observations and parameters can be read from the ARCiS input file:
