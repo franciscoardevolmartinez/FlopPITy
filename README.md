@@ -12,7 +12,8 @@ from floppity import Retrieval
 from floppity.simulators import read_ARCiS_input, ARCiS
 ```
 
-- Now you can initialize the retrieval class with a simulator. ARCiS comes built-in:
+- Now you can initialize the retrieval class with a simulator.
+  A python wrapper for [ARCiS](https://github.com/michielmin/ARCiS) comes built-in (you need to install ARCiS on your own tho):
   
 ```python
 R = Retrieval(ARCiS)
@@ -56,6 +57,27 @@ R.run_retrieval(n_rounds=10, n_samples=1000, simulator_kwargs=ARCiS_kwargs)
 
 ```python
 fig = R.plot_corner()
+```
+
+# Writing a simulator
+
+Writing a simulator to work for FlopPITy is relatively straightforward. All that's needed is a function that takes in observations and 
+parameters and returns spectra. The spectra need to be returned in a dictionary where each key represents each of the observations simulated (e.g. `simulated[0]` contains PRISM spectra and `simulated[1]` contains MIRI/LRS spectra):
+
+```python
+def simulator(obs, parameters, **kwargs):
+    wvl_0 = obs[0][:,0]
+    wvl_1 = obs[1][:,0]
+    ...
+    wvl_n = obs[n][:,0]
+
+    spectra={}
+    spectra[0] = # array of shape (ndims, len(wvl_0))
+    spectra[1] = # array of shape (ndims, len(wvl_1))
+    ...
+    spectra[n] = # array of shape (ndims, len(wvl_n))
+
+    return spectra
 ```
 
 ## Advanced options:
