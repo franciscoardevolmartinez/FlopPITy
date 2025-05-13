@@ -246,7 +246,6 @@ class Retrieval():
         # self.concatenated=torch.tensor(np.concatenate(list(self.noisy_x.values()), 
                                             #  axis=1), dtype=torch.float32)
 
-        
         self.inference.append_simulations(theta, x, 
                                           proposal=proposal)
         self.posterior_estimator = self.inference.train(show_train_summary=True,

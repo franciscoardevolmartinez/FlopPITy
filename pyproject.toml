@@ -16,8 +16,7 @@ dependencies = [
     "numpy",
     "sbi",
     "corner",
-    "cloudpickle",
-    "geomloss"
+    "cloudpickle"
 ]
 
 [tool.setuptools_scm]

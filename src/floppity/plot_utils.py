@@ -2,8 +2,6 @@ import corner
 import torch
 import matplotlib.pyplot as plt
 
-
-
 def plot_moment_evolution(distributions, end, compute_moments_fn, R=None, 
                             num_repeats=10, sample_size=10000):
     """
