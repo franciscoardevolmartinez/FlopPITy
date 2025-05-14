@@ -9,7 +9,7 @@ description = "normalising Flow exoPlanet Parameter Inference Toolkyt"
 readme = "README.md"
 license = "BSD-3-Clause"
 authors = [
-    { name = "Francisco Ardevol Martinez", email = "68873290+franciscoardevolmartinez@users.noreply.github.com" }
+    { name = "Francisco Ardevol Martinez", email = "fardevolmartinez@amnh.org" }
 ]
 requires-python = ">=3.10"
 dependencies = [
