@@ -5,6 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "FlopPITy"
 dynamic = ["version"]
+#version="0.0.3"
 description = "normalising Flow exoPlanet Parameter Inference Toolkyt"
 readme = "README.md"
 license = "BSD-3-Clause"
