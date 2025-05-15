@@ -1,7 +1,10 @@
-This is a code to perform retrievals on spectra of substellar objects using 
+# FlopPITy
+normalizing **Flo**w exo**p**lanet **P**arameter **I**nference **T**oolk**y**t
+
+FlopPITy allows the user to easily perform atmospheric retrievals using 
 SNPE-C (citation) and neural spline flows (citation).
 
-# Installation guide
+## Installation guide
 Currently FlopPITy doesn't work with python 3.13
 
 ```bash
@@ -10,7 +13,7 @@ $ conda activate floppity_env
 $ pip install floppity
 ```
      
-# Basic usage:
+## Basic usage:
 - First, import FlopPITy:
 ```python
 from floppity import Retrieval
@@ -64,7 +67,7 @@ R.run_retrieval(n_rounds=10, n_samples=1000, simulator_kwargs=ARCiS_kwargs)
 fig = R.plot_corner()
 ```
 
-# Writing a simulator
+## Writing a simulator
 
 Writing a simulator to work for FlopPITy is relatively straightforward. All that's needed is a function that takes in observations and 
 parameters and returns spectra. The spectra need to be returned in a dictionary where each key represents each of the observations simulated (e.g. `simulated[0]` contains PRISM spectra and `simulated[1]` contains MIRI/LRS spectra):
