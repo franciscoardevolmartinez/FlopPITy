@@ -278,8 +278,8 @@ class Retrieval():
         self.posterior=self.inference.build_posterior(
             self.posterior_estimator).set_default_x(self.default_obs)
     
-    def run(self, n_threads=1, n_samples=100, n_samples_init=None,
-                        resume=False, n_rounds=10, flow_kwargs=dict(), 
+    def run(self, n_threads=1, n_samples=100, n_samples_init=None, n_agg=1,
+                        resume=False, n_rounds=10, n_aug=1, flow_kwargs=dict(), 
                         training_kwargs=dict(), simulator_kwargs=dict(),
                         ):
         """
@@ -359,8 +359,9 @@ class Retrieval():
                                 )
             self.get_x(xs)
             self.do_postprocessing()
+            self.augment(n_aug)
             self.add_noise()
-            self.train(torch.tensor(self.thetas, dtype=torch.float32), 
+            self.train(torch.tensor(self.augmented_thetas, dtype=torch.float32), 
                     torch.tensor(np.concatenate(list(self.noisy_x.values()),
                     axis=1), 
                     dtype=torch.float32), proposal, **training_kwargs)
@@ -397,7 +398,7 @@ class Retrieval():
         """
         self.noisy_x={}
         for key in self.obs.keys():
-            self.noisy_x[key] = (self.post_x[key]+self.obs[key][:,2]
+            self.noisy_x[key] = (self.augmented_x[key]+self.obs[key][:,2]
                                  *np.random.standard_normal(len(
                                      self.obs[key][:,1])))
 
@@ -541,6 +542,33 @@ class Retrieval():
         plt.show()
 
         return fig
+
+    def augment(self, n_augment=1):
+        """
+        Augments the spectra in self.post_x by creating multiple copies 
+        with added Gaussian noise.
+
+        Parameters
+        ----------
+        n_augment : int, optional
+            Number of augmented copies to create for each spectrum. 
+            Default is 5.
+
+        Returns
+        -------
+        None
+            The augmented spectra are stored in self.augmented_x.
+        """
+        self.augmented_x = {}
+        self.augmented_thetas = []
+        for key, spectrum in self.post_x.items():
+            augmented_spectra = [spectrum.copy() for _ in range(n_augment)]
+            self.augmented_x[key] = np.vstack(augmented_spectra)
+        
+        for _ in range(n_augment):
+            self.augmented_thetas.append(self.thetas.copy())
+        
+        self.augmented_thetas = np.vstack(self.augmented_thetas)
 
 def _run_single_chunk(args):
     """
