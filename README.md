@@ -2,8 +2,9 @@ This is a code to perform retrievals on spectra of substellar objects using
 SNPE-C (citation) and neural spline flows (citation).
 
 - Known issues:
-    - installing sbi needs blas first
-        - conda install blas works, but goes down to python 3.9.22
+    - Requires python<3.13 and numpy<2:
+ 
+      `conda create -n name python==3.12`
      
 # Basic usage:
 - First, import FlopPITy:
