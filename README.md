@@ -1,10 +1,14 @@
 This is a code to perform retrievals on spectra of substellar objects using 
 SNPE-C (citation) and neural spline flows (citation).
 
-- Known issues:
-    - Requires python<3.13 and numpy<2:
- 
-      `conda create -n name python==3.12`
+# Installation guide
+Currently FlopPITy doesn't work with python 3.13
+
+```bash
+$ conda create -n floppity_env python==3.12.9
+$ conda activate floppity_env
+$ pip install floppity
+```
      
 # Basic usage:
 - First, import FlopPITy:
