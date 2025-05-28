@@ -196,7 +196,8 @@ class Retrieval():
 
     def density_builder(self, flow='nsf', transforms=10, hidden=50, 
                         blocks=3, bins=8, dropout=0.05, 
-                        z_score_theta='independent', z_score_x='independent'):
+                        z_score_theta='independent', z_score_x='independent',
+                        tail_bound=1):
         """
         Build the density estimator for the posterior distribution.
         This function initializes a neural network model for posterior
@@ -227,7 +228,8 @@ class Retrieval():
                                     num_bins=bins, 
                                     dropout_probability=dropout,
                                     z_score_theta=z_score_theta,
-                                    z_score_x=z_score_x)
+                                    z_score_x=z_score_x,
+                                    tail_bound=tail_bound)
         self.inference = SNPE_C(prior=self.prior, 
                                 density_estimator=self.density)
 
