@@ -434,14 +434,21 @@ class Retrieval():
         par_idx=0
         for key in self.parameters.keys():
             if self.parameters[key]['post_processing']:
-                postprocessing_function = getattr(postprocessing,
-                                         key)
-                if key=='offset' or key=='scaling':
+                if 'offset' in key:
+                    postprocessing_function = postprocessing.offset
+                    obs_key=int(key[6:])
                     self.post_x[0] = self.x[0]
-                    for obs_key in list(self.x.keys())[1:]:
-                        self.post_x[obs_key] = postprocessing_function(self.nat_thetas[:, par_idx], 
-                                                self.obs[obs_key][:,0], self.x[obs_key])
+                    self.post_x[obs_key] = postprocessing_function(self.nat_thetas[:, par_idx], 
+                                            self.obs[obs_key][:,0], self.x[obs_key])
+                elif 'scaling' in key:
+                    postprocessing_function = postprocessing.scaling
+                    obs_key=int(key[7:])
+                    self.post_x[0] = self.x[0]
+                    self.post_x[obs_key] = postprocessing_function(self.nat_thetas[:, par_idx], 
+                                            self.obs[obs_key][:,0], self.x[obs_key])                                
                 else:
+                    postprocessing_function = getattr(postprocessing,
+                                                    key)
                     for obs_key in self.x.keys():
                         self.post_x[obs_key] = postprocessing_function(self.nat_thetas[:, par_idx], 
                                                 self.obs[obs_key][:,0], self.x[obs_key])
