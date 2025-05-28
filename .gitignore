@@ -187,3 +187,6 @@ examples/R.pkl
 requirements.txt
 examples/Hyperparameter test.ipynb
 src/floppity/data/obs_3.66_0.22_0.28.txt
+src/floppity/data/obs_1
+src/floppity/data/obs_2
+src/floppity/data/obs_3
