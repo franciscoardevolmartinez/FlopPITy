@@ -195,16 +195,16 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     np.savetxt(param_file, parameters)
 
     # Run ARCiS
-    log_files = [f for f in os.listdir(output_dir) if f.startswith('arcis_run_') and f.endswith('.log')]
+    log_files = [f for f in os.listdir(output_dir) if f.startswith(f'arcis_run_{thread}_') and f.endswith('.log')]
     log_nums = []
     for f in log_files:
         try:
-            num = int(f[len('arcis_run_'):-len('.log')])
+            num = int(f[len(f'arcis_run_{thread}_'):-len('.log')])
             log_nums.append(num)
         except ValueError:
             continue
     next_log_num = max(log_nums) + 1 if log_nums else 1
-    log_file = os.path.join(output_dir, f'arcis_run_{next_log_num}.log')
+    log_file = os.path.join(output_dir, f'arcis_run_{thread}_{next_log_num}.log')
 
     with open(log_file, 'w') as log:
         try:

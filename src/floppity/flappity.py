@@ -10,6 +10,7 @@ from floppity import postprocessing
 import multiprocessing as mp
 import cloudpickle as pickle
 from corner import corner
+from scipy.stats.qmc import LatinHypercube, Sobol
 
 class Retrieval():
     def __init__(self, simulator):
@@ -159,6 +160,54 @@ class Retrieval():
         self.thetas=thetas.cpu().detach().numpy().reshape([-1, len(self.parameters)])
         self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
     
+    def lhs_thetas(self, n_samples):
+        """
+        Generate Latin Hypercube samples for parameter space.
+
+        This method creates `n_samples` samples using a Latin Hypercube 
+        sampling strategy based on the dimensions of the `parameters` 
+        attribute. The generated samples are stored in `self.thetas`, 
+        and their natural parameter space equivalents are stored in 
+        `self.nat_thetas`.
+
+        Args:
+            n_samples (int): Number of samples to generate.
+
+        Attributes:
+            thetas (ndarray): Generated samples in the unit hypercube.
+            nat_thetas (ndarray): Samples converted to natural parameter 
+                space.
+        """
+        self.n_samples=n_samples
+        dims = len(self.parameters)
+        sampler = LatinHypercube(d=dims, optimization='random-cd')
+        self.thetas = sampler.random(n=n_samples)
+        self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+
+    def sobol_thetas(self, n_samples):
+        """
+        Generate Latin Hypercube samples for parameter space.
+
+        This method creates `n_samples` samples using a Latin Hypercube 
+        sampling strategy based on the dimensions of the `parameters` 
+        attribute. The generated samples are stored in `self.thetas`, 
+        and their natural parameter space equivalents are stored in 
+        `self.nat_thetas`.
+
+        Args:
+            n_samples (int): Number of samples to generate.
+
+        Attributes:
+            thetas (ndarray): Generated samples in the unit hypercube.
+            nat_thetas (ndarray): Samples converted to natural parameter 
+                space.
+        """
+        self.n_samples=n_samples
+        dims = len(self.parameters)
+        sampler = Sobol(d=dims, optimization='random-cd')
+        self.thetas = sampler.random(n=n_samples)
+        self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+    
     def get_x(self, x):
         """
         Ingests the simulated spectra into the class.
@@ -281,6 +330,7 @@ class Retrieval():
     def run(self, n_threads=1, n_samples=100, n_samples_init=None, n_agg=1,
                         resume=False, n_rounds=10, n_aug=1, flow_kwargs=dict(), 
                         training_kwargs=dict(), simulator_kwargs=dict(),
+                        save_data_to=None, sample_prior_method='sobol'
                         ):
         """
         Executes the retrieval process over multiple rounds, 
@@ -341,9 +391,26 @@ class Retrieval():
         for r in range(n_rounds):
             print(f"Round {r+1}")
             if len(self.proposals)==0:
-                self.get_thetas(self.prior, n_samples_init)
+                if sample_prior_method=='random':
+                    print('Sampling prior randomly')
+                    self.get_thetas(self.prior, n_samples_init)
+                elif sample_prior_method=='lhs':
+                    print('Sampling prior with LHS')
+                    self.lhs_thetas(n_samples)
+                elif sample_prior_method=='sobol':
+                    print('Sampling prior with Sobol')
+                    if (n_samples & (n_samples - 1)) != 0 or n_samples <= 0:
+                        n_samples_new = 2 ** int(np.round(np.log2(n_samples)))
+                        print(f'n_samples must be a power of 2 for Sobol sampling. I will sample the prior with {n_samples_new} samples and then go back to {n_samples} for the following rounds.')
+                        n_samples=n_samples_new
+                    self.sobol_thetas(n_samples)
+                else:
+                    raise ValueError(f"Invalid prior sampling method: {sample_prior_method}. Choose from 'random', 'lhs', or 'sobol'.")
             else:
                 self.get_thetas(self.proposals[-1], n_samples)
+
+            # if prior_samples!=None:
+                
             
             # Create a mask for parameters with post_process as False
             self.sim_pars=0
@@ -358,9 +425,16 @@ class Retrieval():
                                 **simulator_kwargs
                                 )
             self.get_x(xs)
-            self.do_postprocessing()
+
+            if save_data_to != None:
+                pickle.dump(dict(par= self.nat_thetas, 
+                                 spec = self.x),
+                                 open(f'{save_data_to}/data_{r}.pkl', 'wb'))
+
+            self.do_postprocessing()              
             self.augment(n_aug)
             self.add_noise()
+                
             self.train(torch.tensor(self.augmented_thetas, dtype=torch.float32), 
                     torch.tensor(np.concatenate(list(self.noisy_x.values()),
                     axis=1), 
