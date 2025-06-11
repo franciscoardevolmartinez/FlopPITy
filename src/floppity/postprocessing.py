@@ -148,3 +148,54 @@ def scaling(scaling_array, wvl, flux_array):
     """
     scaling_array = np.asarray(scaling_array).reshape(-1, 1)  # shape: (n_spectra, 1)
     return flux_array * scaling_array
+
+def wvl_offset(offset_array, wvl, flux_array, edgeHandling='firstlast', fillValue=None):
+    """
+    Apply a wavelength offset to each spectrum, shifting the fluxes but keeping the original wavelength axis.
+
+    Parameters
+    ----------
+    offset_array : array_like, shape (n_spectra,)
+        Wavelength offsets to apply to each spectrum.
+    wvl : array_like, shape (n_wvl,)
+        Original wavelength grid.
+    flux_array : array_like, shape (n_spectra, n_wvl)
+        Input flux spectra.
+    edgeHandling : str, optional
+        'firstlast' (default) or 'fillValue'.
+    fillValue : float, optional
+        Value to use if edgeHandling='fillValue'.
+
+    Returns
+    -------
+    shifted_flux : array_like, shape (n_spectra, n_wvl)
+        Flux after applying wavelength offsets.
+    """
+    n_spectra, n_wvl = flux_array.shape
+    shifted_flux = np.empty_like(flux_array)
+
+    for i in range(n_spectra):
+        offset = offset_array[i]
+        flux = flux_array[i]
+
+        # Shifted wavelength
+        wlprime = wvl + offset
+
+        # Set interpolation fill value
+        fv = np.nan if edgeHandling != "fillValue" else fillValue
+
+        # Interpolate shifted flux back to original wavelength grid
+        shifted = sci.interp1d(wlprime, flux, bounds_error=False, fill_value=fv)(wvl)
+
+        if edgeHandling == "firstlast":
+            nin = ~np.isnan(shifted)
+            if not nin[0]:
+                fvindex = np.argmax(nin)
+                shifted[:fvindex] = shifted[fvindex]
+            if not nin[-1]:
+                lvindex = -np.argmax(nin[::-1]) - 1
+                shifted[lvindex + 1:] = shifted[lvindex]
+
+        shifted_flux[i] = shifted
+
+    return shifted_flux
