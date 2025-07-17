@@ -326,7 +326,7 @@ class Retrieval():
                            sample_prior_method, n_threads, simulator_kwargs, 
                            n_aug, reuse_prior=None):
 
-        if reuse_prior is not None:
+        if (reuse_prior is not None) and (len(self.proposals) == 0):
             print(f"Reusing prior data from {reuse_prior}")
             prior_data = pickle.load(open(reuse_prior, 'rb'))
 
