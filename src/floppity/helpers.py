@@ -293,3 +293,7 @@ def find_best_fit(obs_dict, sim_dict):
         best_fit_dict[key] = (best_fit_index, best_fit_chi2)
 
     return best_fit_dict
+
+# def IS_weights():
+
+# def IS_evidence():

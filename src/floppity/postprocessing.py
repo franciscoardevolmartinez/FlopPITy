@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 import scipy.interpolate as sci
 
 def vrot(v_array, wvl, spectrum_array, eps=0.6, nr=10, ntheta=100, dif=0.0):
@@ -199,3 +200,73 @@ def wvl_offset(offset_array, wvl, flux_array, edgeHandling='firstlast', fillValu
         shifted_flux[i] = shifted
 
     return shifted_flux
+
+def instrumental_broadening(broadening, wvl, flux_array, **kwargs):
+
+    """
+    Apply instrumental broadening to the spectrum using a Gaussian kernel.
+
+    Parameters
+    ----------
+    broadening : float
+        Full width at half maximum (FWHM) of the Gaussian kernel in wavelength units.
+    wvl : array_like, shape (n_wvl,)
+        Wavelength grid.
+    flux_array : array_like, shape (n_spectra, n_wvl)
+        Input flux spectra.
+    kwargs : dict, optional
+        Additional arguments for customization.
+
+    Returns
+    -------
+    broadened_flux : array_like, shape (n_spectra, n_wvl)
+        Flux after applying instrumental broadening.
+    """
+
+    # Convert FWHM to standard deviation for Gaussian kernel
+    sigma = broadening / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+
+    # Apply Gaussian smoothing to each spectrum
+    broadened_flux = np.array([gaussian_filter1d(flux, sigma / np.mean(np.diff(wvl))) for flux in flux_array])
+
+    return broadened_flux
+
+def add_bb(T, A, wvl, flux):
+    """
+    Add a blackbody contribution to a spectrum.
+
+    Parameters
+    ----------
+    T : float
+        Temperature of the blackbody in Kelvin.
+    A : float
+        Scaling factor for the blackbody contribution.
+    wvl : array_like, shape (n_wvl,)
+        Wavelength grid in microns.
+    flux : array_like, shape (n_wvl,)
+        Input flux spectrum in Jansky.
+
+    Returns
+    -------
+    modified_flux : array_like, shape (n_wvl,)
+        Flux spectrum with the blackbody contribution added.
+    """
+    # Constants
+    h = 6.62607015e-34  # Planck's constant (Joule second)
+    c = 2.99792458e8    # Speed of light (m/s)
+    k = 1.380649e-23    # Boltzmann constant (Joule/Kelvin)
+
+    # Convert wavelength from microns to meters
+    wvl_m = wvl * 1e-6
+
+    # Planck's law for blackbody radiation
+    bb_flux = (2.0 * h * c**2) / (wvl_m**5) / (np.exp((h * c) / (wvl_m * k * T)) - 1.0)
+
+    # Convert blackbody flux to Jansky (1 Jansky = 1e-26 W/m^2/Hz)
+    bb_flux_jy = bb_flux * 1e26 * (wvl_m**2 / c)
+
+    # Scale the blackbody flux and add to the input flux
+    modified_flux = flux + A * bb_flux_jy
+
+    return modified_flux
+
