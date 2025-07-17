@@ -1,6 +1,7 @@
 import numpy as np
 # from geomloss import SamplesLoss
 import torch
+from scipy.special import logsumexp
 
 
 def create_obs_file(wvl, spectrum, error, *args):
@@ -294,6 +295,53 @@ def find_best_fit(obs_dict, sim_dict):
 
     return best_fit_dict
 
-# def IS_weights():
+def likelihood(x, o, s):
+    """Calculate the log likelihood of model spectra compared to an observation.
 
-# def IS_evidence():
+    Args:
+        x (np.ndarray): Array of simulated spectra (each row corresponds to a spectrum).
+        o (np.ndarray): Observed spectra.
+        s (np.ndarray): Errors in the observed spectra.
+
+    Returns:
+        np.ndarray: Log likelihood values for each simulated spectrum.
+    """
+    residual = o - x
+    log_likelihood = -0.5 * np.sum((residual**2 / s**2) + np.log(2 * np.pi * s**2), axis=1)
+    return log_likelihood
+
+def importance_weights(log_likelihoods, log_priors, log_proposal):
+    """Calculate importance weights for a proposal distribution.
+
+    (From Gebhard+25)
+
+    Args:
+        x (np.ndarray): Model spectra.
+        o (np.ndarray): Observed spectra.
+        s (np.ndarray): Errors in the observed spectra.
+        P (np.ndarray): Proposal distribution probabilities.
+
+    Returns:
+        np.ndarray: Importance weights normalized to sum to 1.
+    """
+    # log_likelihoods = likelihood(x,o,s)
+    log_weights = log_likelihoods + log_priors - log_proposal
+    N = len(log_weights)
+    normalized_weights = np.exp(
+        np.log(N) + log_weights - logsumexp(log_weights)
+    )
+    return log_weights.detach().numpy(), normalized_weights.detach().numpy()
+
+def eff(weights):    
+    n_eff = float(np.sum(weights) ** 2 / np.sum(weights**2))
+    sampling_efficiency = n_eff / len(weights)
+    return n_eff, sampling_efficiency
+
+def IS_evidence(weights):
+    n = len(weights)
+    n_eff,_ = eff(weights)
+
+    log_evidence = float(logsumexp(weights) - np.log(n))
+    log_evidence_std = float(np.sqrt((n - n_eff) / (n * n_eff)))
+
+    return log_evidence, log_evidence_std

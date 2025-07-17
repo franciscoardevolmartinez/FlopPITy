@@ -292,18 +292,10 @@ class Retrieval():
             The trained density estimator is stored in `self.density`.
         """
 
-        # normed_thetas = 
-
-        # self.concatenated=torch.tensor(np.concatenate(list(self.noisy_x.values()), 
-                                            #  axis=1), dtype=torch.float32)
-
         self.inference.append_simulations(theta, x, 
                                           proposal=proposal)
-        print('FFRL_F, UCL_F')
+        
         self.posterior_estimator = self.inference.train(show_train_summary=True,
-                                # force_first_round_loss=False,
-                                # retrain_from_scratch=False,
-                                # use_combined_loss=False,
                               **kwargs)
 
     def get_posterior(self):
@@ -330,29 +322,53 @@ class Retrieval():
         self.posterior=self.inference.build_posterior(
             self.posterior_estimator).set_default_x(self.default_obs)
     
-    def generate_training_data(self, proposal, r, n_samples, n_samples_init, 
+    def generate_training_data(self, proposal, r, n_samples, n_samples_init,
                            sample_prior_method, n_threads, simulator_kwargs, 
                            n_aug, reuse_prior=None):
 
         if reuse_prior is not None:
             print(f"Reusing prior data from {reuse_prior}")
             prior_data = pickle.load(open(reuse_prior, 'rb'))
-            self.nat_thetas = prior_data['par']
-            self.get_x(prior_data['spec'])
+
+            #Are there enough samples to reuse?
+            reused_n = min(len(prior_data['par']), n_samples)
+            remaining_n = n_samples - reused_n
+
+            reused_thetas = prior_data['par'][:reused_n]
+            reused_x = {key: value[:reused_n] for key, value in prior_data['spec'].items()}
+
+            if remaining_n > 0:
+                print(f"Generating {remaining_n} additional samples.")
+                self._sample_initial_thetas(sample_prior_method, remaining_n)
+                self.sim_pars = sum(1 for key in self.parameters if not self.parameters[key]['post_processing'])
+
+                # Simulate for additional parameters
+                if n_threads == 1:
+                    new_x = self.simulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
+                else:
+                    new_x = self.psimulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
+
+                # Combine thetas
+                all_thetas = np.concatenate([reused_thetas, self.thetas], axis=0)
+
+                # Combine x dicts
+                all_x = {}
+                for key in reused_x:
+                    all_x[key] = np.concatenate([reused_x[key], new_x[key]], axis=0)
+            
+            else:
+                all_thetas = reused_thetas
+                all_x = reused_x
+
+            self.thetas = all_thetas
+            self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+            self.n_samples = all_thetas.shape[0]
+            self.get_x(all_x)
 
         else:
             # Sample parameters
             if len(self.proposals) == 0:
-                if sample_prior_method == 'random':
-                    self.get_thetas(self.prior, n_samples_init)
-                elif sample_prior_method == 'lhs':
-                    self.lhs_thetas(n_samples)
-                elif sample_prior_method == 'sobol':
-                    if (n_samples & (n_samples - 1)) != 0 or n_samples <= 0:
-                        n_samples_new = 2 ** int(np.round(np.log2(n_samples)))
-                        print(f'Sobol requires power-of-2 samples. Using {n_samples_new} for round 0.')
-                        n_samples = n_samples_new
-                    self.sobol_thetas(n_samples)
+                self._sample_initial_thetas(sample_prior_method, n_samples_init)
             else:
                 self.get_thetas(proposal, n_samples)
 
@@ -381,7 +397,7 @@ class Retrieval():
                         resume=False, n_rounds=10, n_aug=1, flow_kwargs=dict(), 
                         training_kwargs=dict(), simulator_kwargs=dict(), output_dir='output_FlopPITy',
                         save_data=False, sample_prior_method='sobol',
-                        reuse_prior=None
+                        reuse_prior=None, IS=True
                         ):
         """
         Executes the retrieval process over multiple rounds, 
@@ -430,9 +446,6 @@ class Retrieval():
         if n_samples_init==None:
             n_samples_init=n_samples
 
-        # if reuse_prior!=None:
-        #     prior_data=pickle.load(reuse_prior)
-
         if resume:
             print('Resuming training...')
             proposal=self.proposals[-1]
@@ -458,40 +471,11 @@ class Retrieval():
                 n_aug=n_aug,
                 reuse_prior=reuse_prior if r == 0 else None
             )
-            
-            # if len(self.proposals)==0:
-            #     if reuse_prior!=None:
-            #         self.nat_thetas = pickle.load(open(reuse_prior, 'wb'))['par']
-            #     else:
-            #         n_samples = self._sample_initial_thetas(sample_prior_method, n_samples_init)
-            # else:
-            #     self.get_thetas(self.proposals[-1], n_samples)                
-            
-            # # Create a mask for parameters with post_process as False
-            # self.sim_pars = sum(1 for key in self.parameters if not self.parameters[key]['post_processing'])
 
-            # if reuse_prior!=None:
-            #     self.x=pickle.load(open(reuse_prior, 'wb'))['spec']
-            # else:
-            #     if n_threads == 1:
-            #         xs = self.simulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
-            #     else:
-            #         xs = self.psimulator(self.obs, 
-            #                         self.nat_thetas[:, :self.sim_pars],
-            #                         **simulator_kwargs
-            #                         )
-            #     self.get_x(xs)
-
-            # if save == True:
             os.makedirs(output_dir, exist_ok=True)
             self.save(f'{output_dir}/retrieval.pkl')
             if save_data==True:
-                pickle.dump(dict(par=self.nat_thetas, spec=self.x), open(f'{output_dir}/data_{r}.pkl', 'wb'))
-                
-
-            # self.do_postprocessing()              
-            # self.augment(n_aug)
-            # self.add_noise()
+                pickle.dump(dict(par=self.thetas, spec=self.x), open(f'{output_dir}/data_{r}.pkl', 'wb'))
                 
             self.train(theta_tensor, x_tensor, proposal, **training_kwargs)
             
@@ -499,7 +483,7 @@ class Retrieval():
             proposal = self.posterior
             self.proposals.append(proposal)
             self.loss_val=self.inference._summary['best_validation_loss']
-
+    
     def _sample_initial_thetas(self, method, n_samples):
         if method == 'random':
             self.get_thetas(self.prior, n_samples)
@@ -511,8 +495,7 @@ class Retrieval():
                 print(f'n_samples must be a power of 2 for Sobol sampling. I will sample the prior with {n_samples_new} samples and then go back to {n_samples} for the following rounds.')
                 n_samples = n_samples_new
             self.sobol_thetas(n_samples)
-        return n_samples
-    
+
     def run_IS():
         return
     
