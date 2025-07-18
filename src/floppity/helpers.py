@@ -295,20 +295,34 @@ def find_best_fit(obs_dict, sim_dict):
 
     return best_fit_dict
 
-def likelihood(x, o, s):
-    """Calculate the log likelihood of model spectra compared to an observation.
+def likelihood(x_dict, obs_dict):
+    """Calculate the log likelihood of model spectra compared to observations.
 
     Args:
-        x (np.ndarray): Array of simulated spectra (each row corresponds to a spectrum).
-        o (np.ndarray): Observed spectra.
-        s (np.ndarray): Errors in the observed spectra.
+        x_dict (dict): Dictionary of simulated spectra (keys are instruments, values are arrays).
+        obs_dict (dict): Dictionary of observed spectra (keys are instruments, values are arrays).
 
     Returns:
-        np.ndarray: Log likelihood values for each simulated spectrum.
+        np.ndarray: Log likelihood values for each simulated spectrum across all instruments.
     """
-    residual = o - x
-    log_likelihood = -0.5 * np.sum((residual**2 / s**2) + np.log(2 * np.pi * s**2), axis=1)
-    return log_likelihood
+    log_likelihoods = []
+
+    for key in obs_dict:
+        obs = obs_dict[key]
+        x = x_dict[key]
+
+        if obs.shape[1] < 3:
+            raise ValueError(f"Observation {key} must have at least 3 columns (wavelength, spectrum, error)")
+
+        if x.shape[1] != len(obs[:, 1]):
+            raise ValueError(f"Shape mismatch for {key}: x shape {x.shape}, obs length {len(obs[:, 1])}")
+
+        residual = obs[:, 1] - x
+        log_likelihood = -0.5 * np.sum((residual**2 / obs[:, 2]**2) + np.log(2 * np.pi * obs[:, 2]**2), axis=1)
+        log_likelihoods.append(log_likelihood)
+
+    # Concatenate log likelihoods from all instruments
+    return np.concatenate(log_likelihoods)
 
 def importance_weights(log_likelihoods, log_priors, log_proposal):
     """Calculate importance weights for a proposal distribution.
@@ -325,12 +339,12 @@ def importance_weights(log_likelihoods, log_priors, log_proposal):
         np.ndarray: Importance weights normalized to sum to 1.
     """
     # log_likelihoods = likelihood(x,o,s)
-    log_weights = log_likelihoods + log_priors - log_proposal
+    log_weights = (log_likelihoods + log_priors - log_proposal).detach().numpy()
     N = len(log_weights)
     normalized_weights = np.exp(
         np.log(N) + log_weights - logsumexp(log_weights)
     )
-    return log_weights.detach().numpy(), normalized_weights.detach().numpy()
+    return log_weights, normalized_weights
 
 def eff(weights):    
     n_eff = float(np.sum(weights) ** 2 / np.sum(weights**2))

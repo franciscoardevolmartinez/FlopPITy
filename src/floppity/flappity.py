@@ -451,17 +451,19 @@ class Retrieval():
             proposal=self.proposals[-1]
         else: 
             print('Starting training...')
-            self.proposals=[]
+            self.IS_sampling_efficiency=[]
+            self.logZ=[]
+            self.dlogZ=[]
             self.create_prior()
+            self.proposals=[self.prior]
             self.density_builder(**flow_kwargs)
             proposal=self.prior
-
 
         for r in range(n_rounds):
             print(f"Round {r+1}")
 
             theta_tensor, x_tensor = self.generate_training_data(
-                proposal=proposal, 
+                proposal=self.proposals[-1], 
                 r=r,
                 n_samples=n_samples, 
                 n_samples_init=n_samples_init, 
@@ -472,6 +474,15 @@ class Retrieval():
                 reuse_prior=reuse_prior if r == 0 else None
             )
 
+            # Do IS stuff
+            if IS:
+                n_eff, sampling_efficiency, logZ, dlogZ= self.run_IS()
+                self.IS_sampling_efficiency.append(sampling_efficiency)
+                self.logZ.append(logZ)
+                self.dlogZ.append(dlogZ)
+                print(f'ε = {sampling_efficiency:.3g}')
+                print(f'log(Z) = {logZ:.3g} +- {dlogZ:.3g}')
+
             os.makedirs(output_dir, exist_ok=True)
             self.save(f'{output_dir}/retrieval.pkl')
             if save_data==True:
@@ -480,8 +491,8 @@ class Retrieval():
             self.train(theta_tensor, x_tensor, proposal, **training_kwargs)
             
             self.get_posterior()
-            proposal = self.posterior
-            self.proposals.append(proposal)
+            # proposal = self.posterior
+            self.proposals.append(self.posterior)
             self.loss_val=self.inference._summary['best_validation_loss']
     
     def _sample_initial_thetas(self, method, n_samples):
@@ -496,8 +507,18 @@ class Retrieval():
                 n_samples = n_samples_new
             self.sobol_thetas(n_samples)
 
-    def run_IS():
-        return
+    def run_IS(self):
+        log_likelihoods= torch.tensor(helpers.likelihood(self.post_x, self.obs))
+        log_priors = self.prior.log_prob(torch.tensor(self.thetas))
+        log_proposal=self.proposals[-1].log_prob(torch.tensor(self.thetas))
+
+        self.raw_IS_weights, self.IS_weights=helpers.importance_weights(log_likelihoods, log_priors, log_proposal)
+
+        n_eff, sampling_efficiency = helpers.eff(self.IS_weights)
+
+        logZ, dlogZ = helpers.IS_evidence(self.raw_IS_weights)
+
+        return n_eff, sampling_efficiency, logZ, dlogZ
     
     def add_noise(self):
         """
