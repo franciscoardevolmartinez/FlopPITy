@@ -7,6 +7,7 @@ from sbi.inference import SNPE_C
 from floppity import helpers
 from sbi.utils import RestrictedPrior, get_density_thresholder
 from floppity import postprocessing
+from floppity import preprocessing
 import multiprocessing as mp
 import cloudpickle as pickle
 from corner import corner
@@ -14,7 +15,7 @@ from scipy.stats.qmc import LatinHypercube, Sobol
 import os
 
 class Retrieval():
-    def __init__(self, simulator):
+    def __init__(self, simulator, obs_type):
         """
         simulator (callable): A function or callable object that 
             simulates data based on the provided parameters. 
@@ -22,10 +23,14 @@ class Retrieval():
             and an array of parameters of shape (n_samples, n_dims).
             Additionally, it must return a dictionary with the same keys
             as the observation.
+
+        obs_type (str): either 'emis' or 'trans'
         """
-        print('version 1')
+
         self.simulator = simulator
         self.parameters = {}
+        self.preprocessing=None
+        self.obs_type=obs_type
 
     def save(self, fname, **options):
         """
@@ -100,7 +105,7 @@ class Retrieval():
             self.obs[i] = np.loadtxt(fnames[i])
 
         self.default_obs=np.concatenate(list(self.obs.values()), 
-                                        axis=0)[:,1].reshape(-1,)
+                                        axis=0)[:,1].reshape(1,-1)
          
     def add_parameter(self, parname, min_value, max_value, 
                       log_scale=False, post_process=False, 
@@ -247,7 +252,8 @@ class Retrieval():
 
     def density_builder(self, flow='nsf', transforms=10, hidden=50, 
                         blocks=3, bins=8, dropout=0.05, 
-                        z_score_theta='independent', z_score_x='independent'):
+                        z_score_theta='independent', z_score_x='independent',
+                        use_batch_norm=True):
         """
         Build the density estimator for the posterior distribution.
         This function initializes a neural network model for posterior
@@ -278,7 +284,8 @@ class Retrieval():
                                     num_bins=bins, 
                                     dropout_probability=dropout,
                                     z_score_theta=z_score_theta,
-                                    z_score_x=z_score_x)
+                                    z_score_x=z_score_x,
+                                    use_batch_norm=use_batch_norm)
         self.inference = SNPE_C(prior=self.prior, 
                                 density_estimator=self.density)
 
@@ -292,10 +299,8 @@ class Retrieval():
             The trained density estimator is stored in `self.density`.
         """
 
-        self.inference.append_simulations(theta, x, 
-                                          proposal=proposal)
-        
-        self.posterior_estimator = self.inference.train(show_train_summary=True,
+        self.posterior_estimator = self.inference.append_simulations(theta, x, 
+                                          proposal=proposal).train(show_train_summary=True,
                               **kwargs)
 
     def get_posterior(self):
@@ -319,14 +324,16 @@ class Retrieval():
             Posterior distribution built from the inference object, 
             conditioned on `self.default_obs`.
         """
+        self.default_obs_norm = self.do_preprocessing(self.default_obs)
+
         self.posterior=self.inference.build_posterior(
-            self.posterior_estimator).set_default_x(self.default_obs)
+            self.posterior_estimator)
     
     def generate_training_data(self, proposal, r, n_samples, n_samples_init,
                            sample_prior_method, n_threads, simulator_kwargs, 
                            n_aug, reuse_prior=None):
-
-        if (reuse_prior is not None) and (len(self.proposals) == 0):
+        
+        if (reuse_prior is not None) and (r == 0):
             print(f"Reusing prior data from {reuse_prior}")
             prior_data = pickle.load(open(reuse_prior, 'rb'))
 
@@ -366,6 +373,7 @@ class Retrieval():
             self.get_x(all_x)
 
         else:
+            print('Generating training examples.')
             # Sample parameters
             if len(self.proposals) == 0:
                 self._sample_initial_thetas(sample_prior_method, n_samples_init)
@@ -387,6 +395,10 @@ class Retrieval():
         self.do_postprocessing()
         self.augment(n_aug)
         self.add_noise()
+
+        if self.obs_type == 'emis':
+            for key in self.noisy_x.keys():
+                self.noisy_x[key][self.noisy_x[key] <= 0] = 1e-11
 
         # Convert to tensors
         theta_tensor = torch.tensor(self.augmented_thetas, dtype=torch.float32)
@@ -463,7 +475,7 @@ class Retrieval():
             print(f"Round {r+1}")
 
             theta_tensor, x_tensor = self.generate_training_data(
-                proposal=self.proposals[-1], 
+                proposal=proposal, 
                 r=r,
                 n_samples=n_samples, 
                 n_samples_init=n_samples_init, 
@@ -487,11 +499,13 @@ class Retrieval():
             self.save(f'{output_dir}/retrieval.pkl')
             if save_data==True:
                 pickle.dump(dict(par=self.thetas, spec=self.x), open(f'{output_dir}/data_{r}.pkl', 'wb'))
+
+            x_norm_tensor = self.do_preprocessing(x_tensor)
                 
-            self.train(theta_tensor, x_tensor, proposal, **training_kwargs)
+            self.train(theta_tensor, x_norm_tensor, proposal, **training_kwargs)
             
             self.get_posterior()
-            # proposal = self.posterior
+            proposal = self.posterior.set_default_x(self.default_obs_norm)
             self.proposals.append(self.posterior)
             self.loss_val=self.inference._summary['best_validation_loss']
     
@@ -551,6 +565,39 @@ class Retrieval():
             self.noisy_x[key] = (self.augmented_x[key]+self.obs[key][:,2]
                                  *np.random.standard_normal(len(
                                      self.obs[key][:,1])))
+
+    def do_preprocessing(self, x):
+        """
+        Applies a sequence of preprocessing functions to the input data.
+
+        Args:
+            x (torch.Tensor or numpy.ndarray): The input data to be preprocessed.
+
+        Returns:
+            torch.Tensor or numpy.ndarray: The preprocessed data after applying the 
+            sequence of preprocessing functions. The output type matches the input type.
+
+        Notes:
+            - The `self.preprocessing` attribute should be a list of preprocessing 
+              function names (as strings) that are defined in the `preprocessing` module.
+            - If `self.preprocessing` is None, the input data `x` is returned unchanged.
+            - If the input `x` is a `torch.Tensor`, it is converted to a NumPy array 
+              before applying each preprocessing function, and then converted back to 
+              a `torch.Tensor` after each function is applied.
+        """
+
+        if self.preprocessing is not None:
+            xnorm = x
+            for i in range(len(self.preprocessing)):
+                preprocessing_fun = getattr(preprocessing, self.preprocessing[i])
+                if isinstance(xnorm, torch.Tensor):
+                    xnorm = preprocessing_fun(xnorm.cpu().numpy())
+                    xnorm = torch.tensor(xnorm, dtype=torch.float32)
+                else:
+                    xnorm = preprocessing_fun(xnorm)
+        else:
+            xnorm = x
+        return xnorm
 
     def do_postprocessing(self):
         """
@@ -660,7 +707,7 @@ class Retrieval():
 
         return combined_spectra
 
-    def plot_corner(self, proposal_id=-1, n_samples=1000, **CORNER_KWARGS):
+    def plot_corner(self, proposal_id=-1, n_samples=1000, IS_weights=False, **CORNER_KWARGS):
         """
         Generates a corner plot for the posterior samples of a proposal distribution.
 
@@ -693,6 +740,7 @@ class Retrieval():
         # Generate the corner plot
         fig = corner(helpers.convert_cube(samples, self.parameters), 
                         labels=list(self.parameters.keys()), 
+                        weights=self.IS_weights if IS_weights else np.ones(n_samples),
                         **CORNER_KWARGS)
 
         # Show the plot
