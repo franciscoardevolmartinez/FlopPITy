@@ -50,6 +50,7 @@ R.parameters=pars
   
 ```python
 ARCiS_kwargs= dict(
+                    ARCiS_dir = "/path/to/ARCiS/executable", #only needs to be set if ARCiS is not on the default path
                     input_file = arcis_input,
                     output_dir = 'path/to/output',
                   )
