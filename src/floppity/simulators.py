@@ -1,6 +1,7 @@
 import numpy as np
 import os
-from tqdm import trange
+import time
+from tqdm import trange, tqdm
 import subprocess
 
 def mock_simulator(obs, pars, thread=0):
@@ -208,13 +209,14 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
 
     with open(log_file, 'w') as log:
         try:
-            subprocess.run(
+            proc=subprocess.Popen(
                 [ARCiS, input_copy, "-o", output_base, "-s", f"parametergridfile={param_file}"],
-                check=True,
+                # check=True,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 text=True
             )
+            check_ARCiS_status(proc, output_base, n_spectra, thread)
             print(f'ARCiS finished successfully. Output logged to: {log_file}')
         except subprocess.CalledProcessError:
             print(f'ARCiS failed. Check log for details: {log_file}')
@@ -253,3 +255,42 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
             os.rmdir(dir_path)
 
     return spectra
+
+def check_ARCiS_status(proc, output_dir, n_models, thread):
+    """
+    Monitor the progress of a Fortran process generating models.
+
+    Args:
+        proc (subprocess.Popen): The running Fortran process.
+        output_dir (str): Directory where models are generated.
+        n_models (int): Total number of models to compute.
+
+    Behavior:
+        Tracks and displays progress of model generation in real-time.
+        Updates progress bar as new models are detected in output_dir.
+        Handles KeyboardInterrupt to stop monitoring gracefully.
+
+    Note:
+        Assumes model directories start with "model".
+    """
+    progress = tqdm(total=n_models, desc=f"Thread {thread}")
+
+    seen = set()  # To avoid double-counting
+
+    try:
+        while proc.poll() is None:
+            # Find new model directories
+            subdirs = [d for d in os.listdir(output_dir)
+                    if os.path.isdir(os.path.join(output_dir, d)) and d.startswith("model")]
+
+            # Count how many are new since last check
+            new = set(subdirs) - seen
+            progress.update(len(new))
+            seen.update(new)
+
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Monitoring interrupted.")
+    finally:
+        proc.wait()
+        progress.close()
