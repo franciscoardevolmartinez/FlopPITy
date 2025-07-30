@@ -86,7 +86,7 @@ def compute_moments(distribution):
     """
     samples = distribution.sample((10000,))
 
-    mean = no.mean(samples)
+    mean = np.mean(samples)
     variance = distribution.variance
 
     # Skewness and kurtosis require sampling
