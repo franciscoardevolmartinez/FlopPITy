@@ -27,3 +27,4 @@ dependencies = [
 write_to = "src/floppity/version.py"
 local_scheme = "no-local-version"
 version_scheme = "no-guess-dev"
+tag_regex = "^v?(?P<version>.*)"
