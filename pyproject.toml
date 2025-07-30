@@ -20,8 +20,8 @@ dependencies = [
     "cloudpickle"
 ]
 
-[tool.setuptools]
-package-data = { "src/floppity" = ["data/data/obs_3.66_0.22_0.28.txt"] }
+#[tool.setuptools]
+#package-data = { "src/floppity" = ["data/data/obs_3.66_0.22_0.28.txt"] }
 
 [tool.setuptools_scm]
 write_to = "src/floppity/version.py"
