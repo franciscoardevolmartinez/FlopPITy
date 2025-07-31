@@ -162,6 +162,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     input_file = kwargs.get('input_file', 'arcis_input.in')
     output_dir = kwargs.get('output_dir', './arcis_outputs')
     ARCiS = kwargs.get('ARCiS_dir', '/usr/local/bin/ARCiS')
+    verbose = kwargs.get('verbose', True)
     os.makedirs(output_dir, exist_ok=True)
 
     # Copy and modify input file
@@ -216,7 +217,8 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
                 stderr=subprocess.STDOUT,
                 text=True
             )
-            check_ARCiS_status(proc, output_base, n_spectra, thread)
+            if verbose:
+                check_ARCiS_status(proc, output_base, n_spectra, thread)
             print(f'ARCiS finished successfully. Output logged to: {log_file}')
         except subprocess.CalledProcessError:
             print(f'ARCiS failed. Check log for details: {log_file}')
