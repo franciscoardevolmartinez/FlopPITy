@@ -210,15 +210,15 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
 
     with open(log_file, 'w') as log:
         try:
-            proc=subprocess.Popen(
+            proc=subprocess.run(
                 [ARCiS, input_copy, "-o", output_base, "-s", f"parametergridfile={param_file}"],
-                # check=True,
+                check=True,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 text=True
             )
-            if verbose:
-                check_ARCiS_status(proc, output_base, n_spectra, thread)
+            # if verbose:
+            #     check_ARCiS_status(proc, output_base, n_spectra, thread)
             print(f'ARCiS finished successfully. Output logged to: {log_file}')
         except subprocess.CalledProcessError:
             print(f'ARCiS failed. Check log for details: {log_file}')
