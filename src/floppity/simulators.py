@@ -163,6 +163,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     output_dir = kwargs.get('output_dir', './arcis_outputs')
     ARCiS = kwargs.get('ARCiS_dir', '/usr/local/bin/ARCiS')
     verbose = kwargs.get('verbose', True)
+    num_threads = kwargs.get('num_threads', "4")
     os.makedirs(output_dir, exist_ok=True)
 
     # Copy and modify input file
@@ -210,12 +211,15 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
 
     with open(log_file, 'w') as log:
         try:
-            proc=subprocess.run(
+            env = os.environ.copy()
+            env["OMP_NUM_THREADS"] = num_threads
+            subprocess.run(
                 [ARCiS, input_copy, "-o", output_base, "-s", f"parametergridfile={param_file}"],
                 check=True,
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                text=True
+                text=True,
+                env=env
             )
             # if verbose:
             #     check_ARCiS_status(proc, output_base, n_spectra, thread)

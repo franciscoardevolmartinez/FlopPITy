@@ -13,6 +13,7 @@ import cloudpickle as pickle
 from corner import corner
 from scipy.stats.qmc import LatinHypercube, Sobol
 import os
+import platform
 
 class Retrieval():
     def __init__(self, simulator, obs_type):
@@ -692,7 +693,12 @@ class Retrieval():
             for i, chunk in enumerate(chunks)
         ]
 
-        with mp.get_context("spawn").Pool(processes=self.n_threads) as pool:
+        if platform.system() == "Linux":
+            mp_context = "fork"
+        else:
+            mp_context = "spawn"
+
+        with mp.get_context(mp_context).Pool(processes=self.n_threads) as pool:
             spectra_parts = pool.map(_run_single_chunk, args)
 
         # Combine results across threads
