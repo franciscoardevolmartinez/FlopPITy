@@ -694,7 +694,7 @@ class Retrieval():
         ]
 
         if platform.system() == "Linux":
-            mp_context = "fork"
+            mp_context = "spawn"
         else:
             mp_context = "spawn"
 
