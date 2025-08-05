@@ -14,6 +14,7 @@ from corner import corner
 from scipy.stats.qmc import LatinHypercube, Sobol
 import os
 import platform
+import time
 
 class Retrieval():
     def __init__(self, simulator, obs_type):
@@ -786,6 +787,7 @@ def _run_single_chunk(args):
     Standalone helper for multiprocessing — must be top-level (not nested).
     """
     simulator_func, obs, parameters_chunk, thread_idx, kwargs = args
+    time.sleep(thread_idx * 0.05)
     return simulator_func(obs, parameters_chunk, thread_idx, **kwargs)
 
 
