@@ -682,22 +682,24 @@ class Retrieval():
             self.n_threads = n_total
 
         chunk_size = n_total // self.n_threads
-        chunks = [parameters[i * chunk_size: (i + 1) * chunk_size] for i in range(self.n_threads)]
-        
-        # If there's a remainder, add it to the last chunk
         remainder = n_total % self.n_threads
-        if remainder:
-            chunks[-1] = np.vstack([chunks[-1], parameters[-remainder:]])
+
+        chunk_sizes = [chunk_size + 1 if i < remainder else chunk_size for i in range(self.n_threads)]
+
+
+        chunks = []
+        start = 0
+        for size in chunk_sizes:
+            end = start + size
+            chunks.append(parameters[start:end])
+            start = end
 
         args = [
             (self.simulator, self.obs, chunk, i, kwargs)
             for i, chunk in enumerate(chunks)
         ]
 
-        if platform.system() == "Linux":
-            mp_context = "spawn"
-        else:
-            mp_context = "spawn"
+        mp_context = "spawn"
 
         with mp.get_context(mp_context).Pool(processes=self.n_threads) as pool:
             spectra_parts = pool.map(_run_single_chunk, args)
