@@ -377,7 +377,7 @@ class Retrieval():
         else:
             print('Generating training examples.')
             # Sample parameters
-            if len(self.proposals) == 0:
+            if r == 0:
                 self._sample_initial_thetas(sample_prior_method, n_samples_init)
             else:
                 self.get_thetas(proposal, n_samples)
