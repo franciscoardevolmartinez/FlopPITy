@@ -1,6 +1,17 @@
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 import scipy.interpolate as sci
+from typing import List
+
+def enforce_list_length(expected_length):
+    def decorator(func):
+        func.expected_length = expected_length
+        def wrapper(lst: List):
+            if len(lst) != expected_length:
+                raise ValueError(f"List must have length {expected_length}, got {len(lst)}")
+            return func(lst)
+        return wrapper
+    return decorator
 
 def vrot(v_array, wvl, spectrum_array, eps=0.6, nr=10, ntheta=100, dif=0.0):
     """
@@ -231,16 +242,18 @@ def instrumental_broadening(broadening, wvl, flux_array, **kwargs):
 
     return broadened_flux
 
-def add_bb(T, A, wvl, flux):
+@enforce_list_length(2)
+def add_bb(pars: List[float], wvl, flux):
+
     """
     Add a blackbody contribution to a spectrum.
 
     Parameters
     ----------
-    T : float
-        Temperature of the blackbody in Kelvin.
-    A : float
-        Scaling factor for the blackbody contribution.
+    pars : array_like, shape (n, 2)
+            Array containing blackbody parameters. Each row corresponds 
+            to a blackbody, with the first column as temperature (Kelvin) 
+            and the second column as scaling factor.
     wvl : array_like, shape (n_wvl,)
         Wavelength grid in microns.
     flux : array_like, shape (n_wvl,)
@@ -251,6 +264,8 @@ def add_bb(T, A, wvl, flux):
     modified_flux : array_like, shape (n_wvl,)
         Flux spectrum with the blackbody contribution added.
     """
+    T = pars[:,0]
+    A = pars[:,1]
     # Constants
     h = 6.62607015e-34  # Planck's constant (Joule second)
     c = 2.99792458e8    # Speed of light (m/s)

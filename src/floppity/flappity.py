@@ -87,7 +87,7 @@ class Retrieval():
         with open(fname, 'rb') as f:
             return pickle.load(f)
     
-    def get_obs(self, fnames):
+    def get_obs(self, fnames, error_inflation=1):
         '''
         Read observation(s) to run retrievals on. Needs to be in the 
         format required by the simulator used.
@@ -103,8 +103,13 @@ class Retrieval():
             dictionary with all the observations, keyed 0, 1, 2...
         '''
         self.obs={}
+        self.error_inflation = error_inflation
         for i in range(len(fnames)):
             self.obs[i] = np.loadtxt(fnames[i])
+        
+        if self.obs_type == 'emis':
+            for key in self.obs.keys():
+                self.obs[key][self.obs[key] <= 0] = 1e-12
 
         self.default_obs=np.concatenate(list(self.obs.values()), 
                                         axis=0)[:,1].reshape(1,-1)
@@ -400,7 +405,7 @@ class Retrieval():
 
         if self.obs_type == 'emis':
             for key in self.noisy_x.keys():
-                self.noisy_x[key][self.noisy_x[key] <= 0] = 1e-11
+                self.noisy_x[key][self.noisy_x[key] <= 0] = 1e-12
 
         # Convert to tensors
         theta_tensor = torch.tensor(self.augmented_thetas, dtype=torch.float32)
@@ -488,6 +493,12 @@ class Retrieval():
                 reuse_prior=reuse_prior if r == 0 else None
             )
 
+            # Save
+            os.makedirs(output_dir, exist_ok=True)
+            self.save(f'{output_dir}/retrieval.pkl')
+            if save_data==True:
+                pickle.dump(dict(par=self.thetas, spec=self.x), open(f'{output_dir}/data_{r}.pkl', 'wb'))
+
             # Do IS stuff
             if IS:
                 n_eff, sampling_efficiency, logZ, dlogZ= self.run_IS()
@@ -496,11 +507,6 @@ class Retrieval():
                 self.dlogZ.append(dlogZ)
                 print(f'ε = {sampling_efficiency:.3g}')
                 print(f'log(Z) = {logZ:.3g} +- {dlogZ:.3g}')
-
-            os.makedirs(output_dir, exist_ok=True)
-            self.save(f'{output_dir}/retrieval.pkl')
-            if save_data==True:
-                pickle.dump(dict(par=self.thetas, spec=self.x), open(f'{output_dir}/data_{r}.pkl', 'wb'))
 
             x_norm_tensor = self.do_preprocessing(x_tensor)
                 
@@ -511,6 +517,13 @@ class Retrieval():
             self.proposals.append(self.posterior)
             self.loss_val=self.inference._summary['best_validation_loss']
     
+    # def run_ensemble(self, N, **run_kwargs):
+    #     ensemble={}
+    #     for i in range(N):
+    #         self.run(**run_kwargs)
+    #         ensemble[i]
+    #     return
+
     def _sample_initial_thetas(self, method, n_samples):
         if method == 'random':
             self.get_thetas(self.prior, n_samples)
@@ -564,7 +577,7 @@ class Retrieval():
         """
         self.noisy_x={}
         for key in self.obs.keys():
-            self.noisy_x[key] = (self.augmented_x[key]+self.obs[key][:,2]
+            self.noisy_x[key] = (self.augmented_x[key]+self.error_inflation*self.obs[key][:,2]
                                  *np.random.standard_normal(len(
                                      self.obs[key][:,1])))
 
