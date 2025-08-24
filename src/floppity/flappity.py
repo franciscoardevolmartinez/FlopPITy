@@ -369,7 +369,6 @@ class Retrieval():
                 all_x = {}
                 for key in reused_x:
                     all_x[key] = np.concatenate([reused_x[key], new_x[key]], axis=0)
-            
             else:
                 all_thetas = reused_thetas
                 all_x = reused_x
@@ -378,7 +377,6 @@ class Retrieval():
             self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
             self.n_samples = all_thetas.shape[0]
             self.get_x(all_x)
-
         else:
             print('Generating training examples.')
             # Sample parameters
@@ -577,8 +575,9 @@ class Retrieval():
         """
         self.noisy_x={}
         for key in self.obs.keys():
+            self.noisy_x[key] = np.empty_like(self.augmented_x[key])
             for i in range(len(self.augmented_x[key])):
-                self.noisy_x[key] = (self.augmented_x[key][i]+self.obs[key][:,2]
+                self.noisy_x[key][i] = (self.augmented_x[key][i]+self.obs[key][:,2]
                                  *np.random.standard_normal(len(
                                      self.obs[key][:,1])))
 
