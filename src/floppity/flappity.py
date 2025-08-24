@@ -87,7 +87,7 @@ class Retrieval():
         with open(fname, 'rb') as f:
             return pickle.load(f)
     
-    def get_obs(self, fnames)#, err_inf=dict()):
+    def get_obs(self, fnames):#, err_inf=dict()):
         '''
         Read observation(s) to run retrievals on. Needs to be in the 
         format required by the simulator used.
