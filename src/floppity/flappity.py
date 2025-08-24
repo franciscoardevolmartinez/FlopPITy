@@ -87,7 +87,7 @@ class Retrieval():
         with open(fname, 'rb') as f:
             return pickle.load(f)
     
-    def get_obs(self, fnames, error_inflation=dict()):
+    def get_obs(self, fnames)#, err_inf=dict()):
         '''
         Read observation(s) to run retrievals on. Needs to be in the 
         format required by the simulator used.
@@ -103,7 +103,7 @@ class Retrieval():
             dictionary with all the observations, keyed 0, 1, 2...
         '''
         self.obs={}
-        self.error_inflation = error_inflation
+        # self.err_inf = err_inf
         for i in range(len(fnames)):
             self.obs[i] = np.loadtxt(fnames[i])
         
@@ -578,7 +578,7 @@ class Retrieval():
         self.noisy_x={}
         for key in self.obs.keys():
             for i in range(len(self.augmented_x[key])):
-                self.noisy_x[key] = (self.augmented_x[key][i]+self.error_inflation[key]*self.obs[key][:,2]
+                self.noisy_x[key] = (self.augmented_x[key][i]+self.obs[key][:,2]
                                  *np.random.standard_normal(len(
                                      self.obs[key][:,1])))
 
