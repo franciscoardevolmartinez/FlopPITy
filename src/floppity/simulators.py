@@ -253,3 +253,21 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
             os.rmdir(dir_path)
 
     return spectra
+
+def read_Picaso_input(config):
+
+    obs_list = []
+    for i,key in enumerate(config['InputOutput']['observation_data'].keys()):
+        obs_list.append(config['InputOutput']['observation_data'][key])
+
+    retrieval_config=config['retrieval']
+
+    par_dict = {}
+    i = 0
+    for key in retrieval_config.keys():
+        par
+
+    return par_dict, obs_list
+
+def Picaso(obs, parameters, thread=0, **kwargs):
+    return
