@@ -17,7 +17,6 @@ $ pip install floppity
 - First, import FlopPITy:
 ```python
 from floppity import Retrieval
-from floppity.simulators import read_ARCiS_input, ARCiS
 ```
 
 - Now you can initialize the retrieval class with a simulator. A simulator is a function that takes in parameters and returns spectra, look below to see specifically how it needs to be written.
@@ -52,7 +51,7 @@ fig = R.plot_corner()
 
 ## ARCiS example:
 
--Firstly, initialize your retrieval object:
+- Firstly, initialize your retrieval object:
 
 ```python
 from floppity import Retrieval
