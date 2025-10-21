@@ -23,7 +23,7 @@ from floppity import Retrieval
   Functionality for [ARCiS](https://github.com/michielmin/ARCiS) and [PICASO](https://natashabatalha.github.io/picaso/) comes built-in (you need to install them separately). Look further down for examples.
   
 ```python
-R = Retrieval(your_simulator_function)
+R = Retrieval(your_simulator_function, 'emis')
 ```
 
 - Read in observations and define parameters to retrieve:
@@ -40,7 +40,7 @@ R.add_parameter(par_m, min, max)
 - You can now run the retrieval, indicating the number of rounds and samples per round:
 
 ```python
-R.run_retrieval(n_rounds=10, n_samples=1000, simulator_kwargs=simulator_kwargs)
+R.run(n_rounds=10, n_samples=1000, simulator_kwargs=simulator_kwargs)
 ```
 
 - Great! You can now inspect your posterior:
@@ -57,7 +57,7 @@ fig = R.plot_corner()
 from floppity import Retrieval
 from floppity.simulators import read_ARCiS_input, ARCiS
 
-R = Retrieval(ARCiS)
+R = Retrieval(ARCiS, 'emis')
 ```
 
 - For ARCiS, the observations and parameters can be read from the ARCiS input file:
@@ -81,7 +81,7 @@ ARCiS_kwargs= dict(
 - You can now run the retrieval as usual:
 
 ```python
-R.run_retrieval(n_rounds=10, n_samples=1000, simulator_kwargs=ARCiS_kwargs)
+R.run(n_rounds=10, n_samples=1000, simulator_kwargs=ARCiS_kwargs)
 ```
 
 ## PICASO example:
@@ -92,7 +92,7 @@ R.run_retrieval(n_rounds=10, n_samples=1000, simulator_kwargs=ARCiS_kwargs)
 from floppity import Retrieval
 from floppity.simulators import read_PICASO_config, PICASO
 
-R = Retrieval(PICASO)
+R = Retrieval(PICASO, 'emis')
 
 pars, obs_list = read_PICASO_config('path/to/config.toml')
 R.get_obs(obs_list)
@@ -110,7 +110,7 @@ PICASO_kwargs= dict(
 - You can now run the retrieval as usual:
 
 ```python
-R.run_retrieval(n_rounds=10, n_samples=1000, simulator_kwargs=PICASO_kwargs)
+R.run(n_rounds=10, n_samples=1000, simulator_kwargs=PICASO_kwargs)
 ```
 
 
