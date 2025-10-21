@@ -29,7 +29,7 @@ R = Retrieval(your_simulator_function)
 - Read in observations and define parameters to retrieve:
     
 ```python
-R.get_obs(['path/to/obs_0', 'path/to/obs_1',..., 'path/to/obs_n'])
+R.get_obs({obs_0:'path/to/obs_0', obs_1:'path/to/obs_1',..., obs_n:np.array(shape=[n_wvl,>3])})
     
 R.add_parameter(par_0, min, max)
 R.add_parameter(par_1, min, max)
