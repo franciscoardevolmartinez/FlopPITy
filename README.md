@@ -127,8 +127,8 @@ def simulator(obs, parameters, **kwargs):
     wvl_n = obs[n][:,0]
 
     spectra={}
-    spectra[0] = # array of shape (ndims, len(wvl_0))
-    spectra[1] = # array of shape (ndims, len(wvl_1))
+    spectra['prism'] = # array of shape (ndims, len(wvl_prism))
+    spectra['lrs'] = # array of shape (ndims, len(wvl_lrs))
     ...
     spectra[n] = # array of shape (ndims, len(wvl_n))
 
