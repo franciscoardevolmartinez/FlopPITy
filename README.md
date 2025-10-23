@@ -86,7 +86,7 @@ R.run(n_rounds=10, n_samples=1000, simulator_kwargs=ARCiS_kwargs)
 
 ## PICASO example:
 
-- Running a retrieval with PICASO is very similar (this only works with the grid_tree branch):
+- Running a retrieval with PICASO is very similar (this only works with the gridtree branch):
     
 ```python
 from floppity import Retrieval
