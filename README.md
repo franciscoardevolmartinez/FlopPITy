@@ -17,25 +17,47 @@ $ pip install floppity
 - First, import FlopPITy:
 ```python
 from floppity import Retrieval
-from floppity.simulators import read_ARCiS_input, ARCiS
 ```
 
-- Now you can initialize the retrieval class with a simulator.
-  A python wrapper for [ARCiS](https://github.com/michielmin/ARCiS) comes built-in (you need to install ARCiS on your own tho):
+- Now you can initialize the retrieval class with a simulator. A simulator is a function that takes in parameters and returns spectra, look below to see specifically how it needs to be written.
+  Functionality for [ARCiS](https://github.com/michielmin/ARCiS) and [PICASO](https://natashabatalha.github.io/picaso/) comes built-in (you need to install them separately). Look further down for examples.
   
 ```python
-R = Retrieval(ARCiS)
+R = Retrieval(your_simulator_function, 'emis')
 ```
 
 - Read in observations and define parameters to retrieve:
     
 ```python
-R.get_obs(['path/to/obs_0', 'path/to/obs_1',..., 'path/to/obs_n'])
+R.get_obs({obs_0:'path/to/obs_0', obs_1:'path/to/obs_1',..., obs_n:np.array(shape=[n_wvl,>3])})
     
 R.add_parameter(par_0, min, max)
 R.add_parameter(par_1, min, max)
 ...
 R.add_parameter(par_m, min, max)
+```
+
+- You can now run the retrieval, indicating the number of rounds and samples per round:
+
+```python
+R.run(n_rounds=10, n_samples=1000, simulator_kwargs=simulator_kwargs)
+```
+
+- Great! You can now inspect your posterior:
+
+```python
+fig = R.plot_corner()
+```
+
+## ARCiS example:
+
+- Firstly, initialize your retrieval object:
+
+```python
+from floppity import Retrieval
+from floppity.simulators import read_ARCiS_input, ARCiS
+
+R = Retrieval(ARCiS, 'emis')
 ```
 
 - For ARCiS, the observations and parameters can be read from the ARCiS input file:
@@ -46,43 +68,67 @@ R.get_obs(obs_list)
 R.parameters=pars
 ```
 
-- For retrievals using ARCiS, the input file and output directory need to be passed in a dictionary:
+- The input file and output directory need to be passed in a dictionary:
   
 ```python
 ARCiS_kwargs= dict(
                     ARCiS_dir = "/path/to/ARCiS/executable", #only needs to be set if ARCiS is not on the default path
-                    input_file = arcis_input,
+                    input_file = 'path/to/ARCiS/input',
                     output_dir = 'path/to/output',
                   )
 ```
 
-- You can now run the retrieval, indicating the number of rounds and samples per round:
+- You can now run the retrieval as usual:
 
 ```python
-R.run_retrieval(n_rounds=10, n_samples=1000, simulator_kwargs=ARCiS_kwargs)
+R.run(n_rounds=10, n_samples=1000, simulator_kwargs=ARCiS_kwargs)
 ```
 
-- Great! You can now inspect your posterior:
+## PICASO example:
+
+- Running a retrieval with PICASO is very similar (this only works with the gridtree branch):
+    
+```python
+from floppity import Retrieval
+from floppity.simulators import read_PICASO_config, PICASO
+
+R = Retrieval(PICASO, 'emis')
+
+pars, obs_list = read_PICASO_config('path/to/config.toml')
+R.get_obs(obs_list)
+R.parameters=pars
+```
+
+- The configuration file needs to be passed as a kwarg:
+  
+```python
+PICASO_kwargs= dict(
+                    config_file = 'path/to/config.toml'
+                  )
+```
+
+- You can now run the retrieval as usual:
 
 ```python
-fig = R.plot_corner()
+R.run(n_rounds=10, n_samples=1000, simulator_kwargs=PICASO_kwargs)
 ```
+
 
 ## Writing a simulator
 
 Writing a simulator to work for FlopPITy is relatively straightforward. All that's needed is a function that takes in observations and 
-parameters and returns spectra. The spectra need to be returned in a dictionary where each key represents each of the observations simulated (e.g. `simulated[0]` contains PRISM spectra and `simulated[1]` contains MIRI/LRS spectra):
+parameters and returns spectra. The spectra need to be returned in a dictionary where each key represents each of the observations simulated (e.g. `simulated['prism']` contains PRISM spectra and `simulated['lrs']` contains MIRI/LRS spectra):
 
 ```python
 def simulator(obs, parameters, **kwargs):
-    wvl_0 = obs[0][:,0]
-    wvl_1 = obs[1][:,0]
+    wvl_prism = obs['prism'][:,0]
+    wvl_lrs = obs['lrs'][:,0]
     ...
     wvl_n = obs[n][:,0]
 
     spectra={}
-    spectra[0] = # array of shape (ndims, len(wvl_0))
-    spectra[1] = # array of shape (ndims, len(wvl_1))
+    spectra['prism'] = # array of shape (ndims, len(wvl_prism))
+    spectra['lrs'] = # array of shape (ndims, len(wvl_lrs))
     ...
     spectra[n] = # array of shape (ndims, len(wvl_n))
 
