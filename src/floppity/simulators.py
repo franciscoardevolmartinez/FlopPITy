@@ -3,6 +3,7 @@ import os
 import time
 from tqdm import trange, tqdm
 import subprocess
+import importlib
 
 def mock_simulator(obs, pars, thread=0):
     '''
@@ -119,16 +120,16 @@ def read_ARCiS_input(input_path):
             i += 1
 
     # Extract observation file paths
-    obs_list = []
+    obs_dict = {}
     obsn = 1
     for line in clean_in:
         key = f'obs{obsn}:file'
         if key in line:
             path = line.split('=')[-1].strip().strip('"')
-            obs_list.append(path)
+            obs_dict[f'obs{obsn}']=path
             obsn += 1
 
-    return par_dict, obs_list
+    return par_dict, obs_dict
 
 def ARCiS(obs, parameters, thread=0, **kwargs):
     """
@@ -190,8 +191,9 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     output_base = os.path.join(output_dir, f'outputARCiS_{thread}')
 
     n_spectra = parameters.shape[0]
-    obs_indices = sorted(obs.keys())
-    obs_files = [f'obs{idx+1:03d}' for idx in obs_indices]
+    # obs_indices = sorted(obs.keys())
+    obs_indices = obs.keys()
+    obs_files = [f'obs{idx+1:03d}' for idx in range(len(obs_indices))]
 
     # Write parameter grid file
     param_file = os.path.join(output_dir, f'parametergridfile_{thread}.dat')
@@ -262,7 +264,42 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
 
     return spectra
 
+### This needs to be made general for any model and any number of objects/atmospheric columns.
+def ARCiS_binary(obs, parameters, thread=0, **kwargs):
+    """
+    Simulates a binary system using the ARCiS model.
+
+    This function takes observational data and parameters for two objects 
+    in a binary system, processes them using the ARCiS model, and returns 
+    the combined result of the two objects.
+
+    Args:
+        obs: Observational data to be used as input for the ARCiS model.
+        parameters (numpy.ndarray): A 2D array where the first half of the 
+            columns correspond to the parameters for the first object, and 
+            the second half correspond to the parameters for the second object.
+        thread (int, optional): Thread identifier for parallel processing. 
+            Defaults to 0.
+        **kwargs: Additional keyword arguments to be passed to the ARCiS model.
+
+    Returns:
+        The combined result of the ARCiS model applied to the two objects.
+    """
+    nparams = parameters.shape[1]//2
+
+    print('Computing models for object 1.')
+    object1 = ARCiS(obs, parameters[:,:nparams], thread=0, **kwargs)
+
+    print('Computing models for object 2.')
+    object2 = ARCiS(obs, parameters[:,nparams:], thread=0, **kwargs)
+
+    combined = {}
+    for k in object1.keys():
+        combined[k] = object1[k] + object2[k]
+    return combined
+
 def check_ARCiS_status(proc, output_dir, n_models, thread):
+
     """
     Monitor the progress of a Fortran process generating models.
 
@@ -300,3 +337,128 @@ def check_ARCiS_status(proc, output_dir, n_models, thread):
     finally:
         proc.wait()
         progress.close()
+
+def PICASO(obs, parameters, thread=0, **kwargs):
+
+    try:
+        tomllib = importlib.import_module('tomllib')
+    except ImportError:
+        raise ImportError(
+            f"Package tomllib not found. "
+            f"Please install it separately."
+        )
+    try:
+        toml = importlib.import_module('toml')
+    except ImportError:
+        raise ImportError(
+            f"Package toml not found. "
+            f"Please install it separately."
+        )
+    
+    try:
+        picaso = importlib.import_module('picaso')
+    except ImportError:
+        raise ImportError(
+            f"Picaso not found. "
+            f"Please install it separately."
+        )
+
+    config_f=kwargs.get('config_file', None)
+    assert config_f is not None, "Config file can not be None!"
+
+    with open(config_f, "rb") as f:
+            config = tomllib.load(f)
+
+    os.makedirs(config['InputOutput']['retrieval_output'], exist_ok=True)
+
+    output_file_name = config['InputOutput']['retrieval_output']+"/inputs.toml"
+    with open(output_file_name, "w") as toml_file:
+        toml.dump(config, toml_file)
+
+    OPA = picaso.justdoit.opannection(
+        filename_db=config['OpticalProperties']['opacity_files'], #database(s)
+        method=config['OpticalProperties']['opacity_method'], #resampled, preweighted, resortrebin
+        **config['OpticalProperties']['opacity_kwargs'] #additonal inputs 
+        )
+
+    prior_config=config['retrieval']
+    
+    fitpars=picaso.driver.prior_finder(prior_config)
+    ndims=len(fitpars)
+
+    preload_cloud_miefs = picaso.driver.find_values_for_key(config ,'condensate')
+    virga_mieff   = config['OpticalProperties'].get('virga_mieff',None)
+    param_tools = picaso.parameterizations.Parameterize(load_cld_optical=preload_cloud_miefs,
+                                    mieff_dir=virga_mieff)
+    
+    for i,key in enumerate(fitpars.keys()):
+        if fitpars[key]['log']:
+            parameters[:,i] = 10**parameters[:,i]
+    
+    DATA_DICT = picaso.driver.get_data(config)
+    x = picaso.driver.MODEL(parameters, fitpars, config, OPA, param_tools, DATA_DICT)
+
+    return x
+
+def read_PICASO_config(config_file):
+
+    #load necessary packages
+    try:
+        tomllib = importlib.import_module('tomllib')
+    except ImportError:
+        raise ImportError(
+            f"Package toml not found. "
+            f"Please install it separately."
+        )
+    
+    try:
+        picaso = importlib.import_module('picaso')
+    except ImportError:
+        raise ImportError(
+            f"Picaso not found. "
+            f"Please install it separately."
+        )
+    
+    try:
+        xarray = importlib.import_module('xarray')
+    except ImportError:
+        raise ImportError(
+            f"Package xarray not found. "
+            f"Please install it separately."
+        )
+
+    # Get fitted parameters and priors
+    with open(config_file, "rb") as f:
+        config = tomllib.load(f)
+    prior_config=config['retrieval']
+    fitpars=picaso.driver.prior_finder(prior_config)
+    par_dict={}
+
+    for i,key in enumerate(fitpars.keys()):
+        if fitpars[key]['prior'] == 'uniform':
+            minn=fitpars[key]['min']
+            maxx=fitpars[key]['max']
+            
+            if fitpars[key]['log']:
+                # minn=10**minn
+                # maxx=10**maxx
+                log_flag=True
+            else:
+                log_flag=False
+
+        par_dict[key] = {
+                'min': minn,
+                'max': maxx,
+                'log': log_flag,
+                'post_processing': False,
+                'universal': False
+            }
+        
+    # Read observations
+    data_dict = picaso.driver.get_data(config)
+
+    obs_dict={}
+    for key in data_dict:
+        obs_dict[key] = np.column_stack(data_dict[key])
+        
+    return par_dict, obs_dict

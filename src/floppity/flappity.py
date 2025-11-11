@@ -17,7 +17,7 @@ import platform
 import time
 
 class Retrieval():
-    def __init__(self, simulator, obs_type):
+    def __init__(self, simulator):
         """
         simulator (callable): A function or callable object that 
             simulates data based on the provided parameters. 
@@ -32,7 +32,11 @@ class Retrieval():
         self.simulator = simulator
         self.parameters = {}
         self.preprocessing=None
-        self.obs_type=obs_type
+        # self.obs_type=obs_type
+    
+    def add_preprocessing(self, type, **kwargs):
+        self.preprocessing=type
+        # self.preprocessing_kwargs=kwargs
 
     def save(self, fname, **options):
         """
@@ -87,15 +91,17 @@ class Retrieval():
         with open(fname, 'rb') as f:
             return pickle.load(f)
     
-    def get_obs(self, fnames):#, err_inf=dict()):
+    def get_obs(self, observations):#, err_inf=dict()):
         '''
         Read observation(s) to run retrievals on. Needs to be in the 
         format required by the simulator used.
 
         Parameters
         ----------
-        fnames : list of strings
-            list with the locations of all observations to analyze
+        observations : dict 
+            dictionary containing files or arrays with the observations.
+            The dictionary keys need to identify the observations and are 
+            used to retrieve error inflations, offsets, scalings...
 
         Returns
         -------
@@ -103,13 +109,25 @@ class Retrieval():
             dictionary with all the observations, keyed 0, 1, 2...
         '''
         self.obs={}
-        # self.err_inf = err_inf
-        for i in range(len(fnames)):
-            self.obs[i] = np.loadtxt(fnames[i])
+
+        assert isinstance(observations, dict), "Observations need to be passed in a dictionary"
+
+        for key in observations.keys():
+            item = observations[key]
+
+            if isinstance(item, str):
+                arr = np.loadtxt(item)
+            # If it's already a numpy array, just use it
+            elif isinstance(item, np.ndarray):
+                arr = item
+            else:
+                raise TypeError(f"Unsupported type for fnames['{key}']: {type(item)}. Must be str or np.ndarray.")
+            
+            self.obs[key] = arr
         
-        if self.obs_type == 'emis':
-            for key in self.obs.keys():
-                self.obs[key][self.obs[key] <= 0] = 1e-12
+        # if self.obs_type == 'emis':
+        #     for key in self.obs.keys():
+        #         self.obs[key][self.obs[key] <= 0] = 1e-300
 
         self.default_obs=np.concatenate(list(self.obs.values()), 
                                         axis=0)[:,1].reshape(1,-1)
@@ -401,9 +419,9 @@ class Retrieval():
         self.augment(n_aug)
         self.add_noise()
 
-        if self.obs_type == 'emis':
-            for key in self.noisy_x.keys():
-                self.noisy_x[key][self.noisy_x[key] <= 0] = 1e-12
+        # if self.obs_type == 'emis':
+        #     for key in self.noisy_x.keys():
+        #         self.noisy_x[key][self.noisy_x[key] <= 0] = 1e-12
 
         # Convert to tensors
         theta_tensor = torch.tensor(self.augmented_thetas, dtype=torch.float32)
@@ -498,15 +516,19 @@ class Retrieval():
                 pickle.dump(dict(par=self.thetas, spec=self.x), open(f'{output_dir}/data_{r}.pkl', 'wb'))
 
             # Do IS stuff
-            if IS:
-                n_eff, sampling_efficiency, logZ, dlogZ= self.run_IS()
-                self.IS_sampling_efficiency.append(sampling_efficiency)
-                self.logZ.append(logZ)
-                self.dlogZ.append(dlogZ)
-                print(f'ε = {sampling_efficiency:.3g}')
-                print(f'log(Z) = {logZ:.3g} +- {dlogZ:.3g}')
+            # if IS:
+            #     n_eff, sampling_efficiency, logZ, dlogZ= self.run_IS()
+            #     self.IS_sampling_efficiency.append(sampling_efficiency)
+            #     self.logZ.append(logZ)
+            #     self.dlogZ.append(dlogZ)
+            #     print(f'ε = {sampling_efficiency:.3g}')
+            #     print(f'log(Z) = {logZ:.3g} +- {dlogZ:.3g}')
 
+            # print(x_tensor[0])
             x_norm_tensor = self.do_preprocessing(x_tensor)
+
+            # print(theta_tensor)
+            # print(x_norm_tensor[0])
                 
             self.train(theta_tensor, x_norm_tensor, proposal, **training_kwargs)
             
@@ -603,6 +625,8 @@ class Retrieval():
 
         if self.preprocessing is not None:
             xnorm = x
+            if not isinstance(self.preprocessing, list):
+                self.preprocessing = [self.preprocessing]
             for i in range(len(self.preprocessing)):
                 preprocessing_fun = getattr(preprocessing, self.preprocessing[i])
                 if isinstance(xnorm, torch.Tensor):

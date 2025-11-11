@@ -2,6 +2,7 @@ import numpy as np
 # from geomloss import SamplesLoss
 import torch
 from scipy.special import logsumexp
+from numba import njit
 
 
 def create_obs_file(wvl, spectrum, error, *args):
@@ -142,59 +143,42 @@ def find_MAP(proposal):
                        show_progress_bars=True, force_update=False
                        )
 
-def reduced_chi_squared(obs_dict, sim_dict, n_params=0):
-    """
-    Compute reduced chi-squared values for each simulation vs observation.
+# @njit
+def reduced_chi_squared(obs_dict, sim_dict, n_params=0, batch_size=500000):
+    total_dof = 0
+    total_chi2 = None
 
-    Parameters
-    ----------
-    obs_dict : dict
-        Keys are observation names. Values are arrays of shape (n_points, ≥3)
-        with columns: wavelength, observed spectrum, error.
-    sim_dict : dict
-        Keys are the same as obs_dict. Values are arrays of shape
-        (n_samples, n_points), corresponding to simulated spectra.
-    n_params : int
-        Number of fitted parameters to subtract from degrees of freedom (default: 0).
-
-    Returns
-    -------
-    chi2_dict : dict
-        Dictionary with same keys, values are arrays of shape (n_samples,)
-        with reduced chi-squared values.
-    """
-
-    chi2_dict = {}
-
-    for key in obs_dict:
-        obs_array = obs_dict[key]
+    for key, obs_array in obs_dict.items():
         sims = sim_dict[key]
 
         if obs_array.shape[1] < 3:
-            raise ValueError(f"Observation {key} must have at least 3 columns (wvl, spectrum, error)")
+            raise ValueError(f"Observation {key} must have at least 3 columns")
 
         obs_spectrum = obs_array[:, 1]
         obs_error = obs_array[:, 2]
+        valid = np.isfinite(obs_spectrum) & np.isfinite(obs_error) & (obs_error > 0)
+        obs_spectrum = obs_spectrum[valid]
+        obs_error = np.where(obs_error[valid] <= 1e-12, 1e-12, obs_error[valid])
+        sims = sims[:, valid]
 
-        if sims.shape[1] != len(obs_spectrum):
-            raise ValueError(f"Shape mismatch for {key}: sims shape {sims.shape}, obs length {len(obs_spectrum)}")
+        dof = len(obs_spectrum)
+        total_dof += dof
 
-        # Avoid division by zero in error
-        error_safe = np.where(obs_error == 0, 1e-10, obs_error)
+        n_samples = sims.shape[0]
+        chi2 = np.zeros(n_samples)
 
-        # Compute chi-squared
-        residuals = (sims - obs_spectrum) / error_safe
-        chi2 = np.sum(residuals**2, axis=1)
+        for start in range(0, n_samples, batch_size):
+            end = min(start + batch_size, n_samples)
+            residuals = (sims[start:end] - obs_spectrum) / obs_error
+            chi2[start:end] = np.sum(residuals**2, axis=1)
 
-        # Degrees of freedom
-        dof = len(obs_spectrum) - n_params
-        if dof <= 0:
-            raise ValueError(f"Non-positive degrees of freedom for {key}: {dof}")
+        total_chi2 = chi2 if total_chi2 is None else total_chi2 + chi2
 
-        chi2_red = chi2 / dof
-        chi2_dict[key] = chi2_red
+    total_dof -= n_params
+    if total_dof <= 0:
+        raise ValueError(f"Non-positive total degrees of freedom: {total_dof}")
 
-    return chi2_dict
+    return total_chi2 / total_dof
 
 # def W2_distance(proposals, n_mc=100, n_draws=1000):
     # """
@@ -285,15 +269,13 @@ def find_best_fit(obs_dict, sim_dict):
         - best_fit_chi2 is the corresponding reduced chi-squared 
           value.
     """
-    chi2_dict = reduced_chi_squared(obs_dict, sim_dict)
+    chi2 = reduced_chi_squared(obs_dict, sim_dict)
     best_fit_dict = {}
 
-    for key, chi2_values in chi2_dict.items():
-        best_fit_index = np.argmin(chi2_values)
-        best_fit_chi2 = chi2_values[best_fit_index]
-        best_fit_dict[key] = (best_fit_index, best_fit_chi2)
+    best_fit_index = np.argmin(chi2)
+    best_fit_chi2 = chi2[best_fit_index]
 
-    return best_fit_dict
+    return best_fit_index, best_fit_chi2
 
 def likelihood(x_dict, obs_dict):
     """Calculate the log likelihood of model spectra compared to observations.
