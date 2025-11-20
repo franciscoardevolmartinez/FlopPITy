@@ -7,7 +7,6 @@ from sbi.inference import SNPE_C
 from floppity import helpers
 from sbi.utils import RestrictedPrior, get_density_thresholder
 from floppity import postprocessing
-from floppity import preprocessing
 import multiprocessing as mp
 import cloudpickle as pickle
 from corner import corner
@@ -31,12 +30,6 @@ class Retrieval():
 
         self.simulator = simulator
         self.parameters = {}
-        self.preprocessing=None
-        # self.obs_type=obs_type
-    
-    def add_preprocessing(self, type, **kwargs):
-        self.preprocessing=type
-        # self.preprocessing_kwargs=kwargs
 
     def save(self, fname, **options):
         """
@@ -63,7 +56,6 @@ class Retrieval():
         state.pop('noisy_x', None)
         state.pop('post_x', None)
         state.pop('x', None)
-        state.pop('nat_thetas', None)
         state.pop('thetas', None)
         return state
 
@@ -124,10 +116,6 @@ class Retrieval():
                 raise TypeError(f"Unsupported type for fnames['{key}']: {type(item)}. Must be str or np.ndarray.")
             
             self.obs[key] = arr
-        
-        # if self.obs_type == 'emis':
-        #     for key in self.obs.keys():
-        #         self.obs[key][self.obs[key] <= 0] = 1e-300
 
         self.default_obs=np.concatenate(list(self.obs.values()), 
                                         axis=0)[:,1].reshape(1,-1)
@@ -168,6 +156,27 @@ class Retrieval():
         self.parameters[parname]['post_processing']=post_process
         self.parameters[parname]['universal']=universal
 
+    def create_prior(self):
+        """
+        Constructs a uniform prior distribution based on the min and max
+        values of parameters in self.parameters.
+
+        Raises:
+            KeyError: If any parameter is missing 'min_value' or 
+            'max_value'.
+        """
+        self.dims = len(self.parameters)
+        low = np.empty((self.dims,))
+        high=np.empty((self.dims,))
+        for i, key in enumerate(self.parameters.keys()):
+            low[i] = self.parameters[key]['min']
+            high[i] = self.parameters[key]['max']
+        low=torch.tensor(low.reshape(1,-1))
+        high = torch.tensor(high.reshape(1,-1))
+
+        self.prior = utils.BoxUniform(low=low,
+                                      high = high)
+
     def get_thetas(self, proposal, n_samples):
         """
         Draw a set of parameter samples (thetas) from the proposal 
@@ -190,7 +199,6 @@ class Retrieval():
         self.n_samples=n_samples
         thetas = proposal.sample((self.n_samples,))
         self.thetas=thetas.cpu().detach().numpy().reshape([-1, len(self.parameters)])
-        self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
     
     def lhs_thetas(self, n_samples):
         """
@@ -214,7 +222,6 @@ class Retrieval():
         dims = len(self.parameters)
         sampler = LatinHypercube(d=dims, optimization='random-cd')
         self.thetas = sampler.random(n=n_samples)
-        self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
 
     def sobol_thetas(self, n_samples):
         """
@@ -237,8 +244,7 @@ class Retrieval():
         self.n_samples=n_samples
         dims = len(self.parameters)
         sampler = Sobol(d=dims, optimization='random-cd')
-        self.thetas = sampler.random(n=n_samples)
-        self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+        self.thetas = helpers.convert_cube(sampler.random(n=n_samples), self.parameters)
     
     def get_x(self, x):
         """
@@ -253,27 +259,6 @@ class Retrieval():
         for key in x.keys():
             self.x[key] = x[key].reshape(self.n_samples, 
                                         len(self.obs[key][:,0]))
-
-    def create_prior(self):
-        """
-        Constructs a uniform prior distribution based on the min and max
-        values of parameters in self.parameters.
-
-        Raises:
-            KeyError: If any parameter is missing 'min_value' or 
-            'max_value'.
-        """
-        # prior_mins = []
-        # prior_maxs = []
-        # for keys in self.parameters.keys():
-        #     prior_mins.append(self.parameters[keys]['min_value'])
-        #     prior_maxs.append(self.parameters[keys]['max_value'])
-        
-        # prior_mins = torch.tensor(np.asarray(prior_mins).reshape(1,-1))
-        # prior_maxs = torch.tensor(np.asarray(prior_maxs).reshape(1,-1))
-
-        self.prior=utils.BoxUniform(low=torch.zeros(len(self.parameters)),
-                                    high=torch.ones(len(self.parameters)))
 
     def density_builder(self, flow='nsf', transforms=10, hidden=50, 
                         blocks=3, bins=8, dropout=0.05, 
@@ -349,7 +334,7 @@ class Retrieval():
             Posterior distribution built from the inference object, 
             conditioned on `self.default_obs`.
         """
-        self.default_obs_norm = self.do_preprocessing(self.default_obs)
+        self.default_obs_norm = self.x_transformer.transform(torch.tensor(self.default_obs,dtype=torch.float32 ))
 
         self.posterior=self.inference.build_posterior(
             self.posterior_estimator)
@@ -359,12 +344,13 @@ class Retrieval():
                            n_aug, reuse_prior=None):
         
         if (reuse_prior is not None) and (r == 0):
+            n_samples_init = n_samples if n_samples_init is None else n_samples_init
             print(f"Reusing prior data from {reuse_prior}")
             prior_data = pickle.load(open(reuse_prior, 'rb'))
 
             #Are there enough samples to reuse?
-            reused_n = min(len(prior_data['par']), n_samples)
-            remaining_n = n_samples - reused_n
+            reused_n = min(len(prior_data['par']), n_samples_init)
+            remaining_n = n_samples_init - reused_n
 
             reused_thetas = prior_data['par'][:reused_n]
             reused_x = {key: value[:reused_n] for key, value in prior_data['spec'].items()}
@@ -376,9 +362,9 @@ class Retrieval():
 
                 # Simulate for additional parameters
                 if n_threads == 1:
-                    new_x = self.simulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
+                    new_x = self.simulator(self.obs, self.thetas[:, :self.sim_pars], **simulator_kwargs)
                 else:
-                    new_x = self.psimulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
+                    new_x = self.psimulator(self.obs, self.thetas[:, :self.sim_pars], **simulator_kwargs)
 
                 # Combine thetas
                 all_thetas = np.concatenate([reused_thetas, self.thetas], axis=0)
@@ -392,7 +378,6 @@ class Retrieval():
                 all_x = reused_x
 
             self.thetas = all_thetas
-            self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
             self.n_samples = all_thetas.shape[0]
             self.get_x(all_x)
         else:
@@ -405,12 +390,11 @@ class Retrieval():
 
             # Determine how many parameters to simulate
             self.sim_pars = sum(1 for key in self.parameters if not self.parameters[key]['post_processing'])
-
             # Simulate
             if n_threads == 1:
-                xs = self.simulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
+                xs = self.simulator(self.obs, self.thetas[:, :self.sim_pars], **simulator_kwargs)
             else:
-                xs = self.psimulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
+                xs = self.psimulator(self.obs, self.thetas[:, :self.sim_pars], **simulator_kwargs)
 
             self.get_x(xs)
 
@@ -419,17 +403,13 @@ class Retrieval():
         self.augment(n_aug)
         self.add_noise()
 
-        # if self.obs_type == 'emis':
-        #     for key in self.noisy_x.keys():
-        #         self.noisy_x[key][self.noisy_x[key] <= 0] = 1e-12
-
         # Convert to tensors
         theta_tensor = torch.tensor(self.augmented_thetas, dtype=torch.float32)
         x_tensor = torch.tensor(np.concatenate(list(self.noisy_x.values()), axis=1), dtype=torch.float32)
         return theta_tensor, x_tensor
 
-    def run(self, n_threads=1, n_samples=100, n_samples_init=None, n_agg=1,
-                        resume=False, n_rounds=10, n_aug=1, flow_kwargs=dict(), 
+    def run(self, n_threads=1, n_samples=1024, n_samples_init=None, log_eps=1e-12,
+                        resume=False, n_rounds=3, n_aug=1, flow_kwargs=dict(), 
                         training_kwargs=dict(), simulator_kwargs=dict(), output_dir='output_FlopPITy',
                         save_data=False, sample_prior_method='sobol',
                         reuse_prior=None, IS=True
@@ -442,36 +422,13 @@ class Retrieval():
         Args:
             n_rounds: int
                 Number of rounds to train iteratively.
+            
             **flow_kwargs: Additional keyword arguments for the 
             density builder.
             **training_kwargs: Additional keyword arguments for the 
             training process.
 
-        Workflow:
-            1. Initializes the proposals list and creates the prior 
-               distribution.
-            2. Builds the density estimator using the provided flow 
-               arguments.
-            3. Iteratively performs the following for each round:
-               - Samples parameters (thetas) from the current proposal 
-             distribution.
-               - Masks parameters based on the 'post_process' flag in 
-             self.parameters.
-               - Simulates data (xs) using the masked parameters and 
-             observed data (R.obs).
-               - Processes the simulated data and adds noise.
-               - Trains the model using the masked parameters and noisy 
-             data.
-               - Updates the posterior distribution and sets it as the 
-             new proposal.
-               - Appends the current proposal to the proposals list.
-
-        Notes:
-            - The method relies on several other methods within the 
-              class, such as `create_prior`, `density_builder`, 
-              `get_thetas`, `get_x`, `do_postprocessing`, `add_noise`, 
-              `train`, and `get_posterior`.
-
+        
         Raises:
             Any exceptions raised by the simulator, training, or other 
             internal methods will propagate up to the caller.
@@ -484,17 +441,19 @@ class Retrieval():
         if resume:
             print('Resuming training...')
             proposal=self.proposals[-1]
+            r0 = len(self.proposals)-1
         else: 
             print('Starting training...')
             self.IS_sampling_efficiency=[]
             self.logZ=[]
             self.dlogZ=[]
             self.create_prior()
+            r0 = 0
             self.proposals=[self.prior]
             self.density_builder(**flow_kwargs)
             proposal=self.prior
 
-        for r in range(n_rounds):
+        for r in range(r0, n_rounds):
             print(f"Round {r+1}")
 
             theta_tensor, x_tensor = self.generate_training_data(
@@ -508,6 +467,10 @@ class Retrieval():
                 n_aug=n_aug,
                 reuse_prior=reuse_prior if r == 0 else None
             )
+
+            if r==0:
+                self.x_transformer = helpers.DataTransformer(eps=log_eps)
+                self.x_transformer.fit(x_tensor)
 
             # Save
             os.makedirs(output_dir, exist_ok=True)
@@ -524,25 +487,14 @@ class Retrieval():
             #     print(f'ε = {sampling_efficiency:.3g}')
             #     print(f'log(Z) = {logZ:.3g} +- {dlogZ:.3g}')
 
-            # print(x_tensor[0])
-            x_norm_tensor = self.do_preprocessing(x_tensor)
-
-            # print(theta_tensor)
-            # print(x_norm_tensor[0])
+            x_std_tensor = self.x_transformer.transform(x_tensor)
                 
-            self.train(theta_tensor, x_norm_tensor, proposal, **training_kwargs)
+            self.train(theta_tensor, x_std_tensor, proposal, **training_kwargs)
             
             self.get_posterior()
             proposal = self.posterior.set_default_x(self.default_obs_norm)
             self.proposals.append(self.posterior)
             self.loss_val=self.inference._summary['best_validation_loss']
-    
-    # def run_ensemble(self, N, **run_kwargs):
-    #     ensemble={}
-    #     for i in range(N):
-    #         self.run(**run_kwargs)
-    #         ensemble[i]
-    #     return
 
     def _sample_initial_thetas(self, method, n_samples):
         if method == 'random':
@@ -603,41 +555,6 @@ class Retrieval():
                                  *np.random.standard_normal(len(
                                      self.obs[key][:,1])))
 
-    def do_preprocessing(self, x):
-        """
-        Applies a sequence of preprocessing functions to the input data.
-
-        Args:
-            x (torch.Tensor or numpy.ndarray): The input data to be preprocessed.
-
-        Returns:
-            torch.Tensor or numpy.ndarray: The preprocessed data after applying the 
-            sequence of preprocessing functions. The output type matches the input type.
-
-        Notes:
-            - The `self.preprocessing` attribute should be a list of preprocessing 
-              function names (as strings) that are defined in the `preprocessing` module.
-            - If `self.preprocessing` is None, the input data `x` is returned unchanged.
-            - If the input `x` is a `torch.Tensor`, it is converted to a NumPy array 
-              before applying each preprocessing function, and then converted back to 
-              a `torch.Tensor` after each function is applied.
-        """
-
-        if self.preprocessing is not None:
-            xnorm = x
-            if not isinstance(self.preprocessing, list):
-                self.preprocessing = [self.preprocessing]
-            for i in range(len(self.preprocessing)):
-                preprocessing_fun = getattr(preprocessing, self.preprocessing[i])
-                if isinstance(xnorm, torch.Tensor):
-                    xnorm = preprocessing_fun(xnorm.cpu().numpy())
-                    xnorm = torch.tensor(xnorm, dtype=torch.float32)
-                else:
-                    xnorm = preprocessing_fun(xnorm)
-        else:
-            xnorm = x
-        return xnorm
-
     def do_postprocessing(self):
         """
         Perform post-processing on the data stored in `self.x` using the 
@@ -672,19 +589,19 @@ class Retrieval():
                     postprocessing_function = postprocessing.offset
                     obs_key=int(key[6:])
                     self.post_x[0] = self.x[0]
-                    self.post_x[obs_key] = postprocessing_function(self.nat_thetas[:, par_idx], 
+                    self.post_x[obs_key] = postprocessing_function(self.thetas[:, par_idx], 
                                             self.obs[obs_key][:,0], self.x[obs_key])
                 elif 'scaling' in key:
                     postprocessing_function = postprocessing.scaling
                     obs_key=int(key[7:])
                     self.post_x[0] = self.x[0]
-                    self.post_x[obs_key] = postprocessing_function(self.nat_thetas[:, par_idx], 
+                    self.post_x[obs_key] = postprocessing_function(self.thetas[:, par_idx], 
                                             self.obs[obs_key][:,0], self.x[obs_key])                                
                 else:
                     postprocessing_function = getattr(postprocessing,
                                                     key)
                     for obs_key in self.x.keys():
-                        self.post_x[obs_key] = postprocessing_function(self.nat_thetas[:, par_idx], 
+                        self.post_x[obs_key] = postprocessing_function(self.thetas[:, par_idx], 
                                                 self.obs[obs_key][:,0], self.x[obs_key])
             else:
                 for obs_key in self.x.keys():
@@ -784,7 +701,7 @@ class Retrieval():
         samples = self.proposals[proposal_id].sample((n_samples,)).detach().numpy()
 
         # Generate the corner plot
-        fig = corner(helpers.convert_cube(samples, self.parameters), 
+        fig = corner(samples, 
                         labels=list(self.parameters.keys()), 
                         weights=self.IS_weights if IS_weights else np.ones(n_samples),
                         **CORNER_KWARGS)

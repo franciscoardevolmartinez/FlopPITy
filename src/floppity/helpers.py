@@ -341,3 +341,63 @@ def IS_evidence(weights):
     log_evidence_std = float(np.sqrt((n - n_eff) / (n * n_eff)))
 
     return log_evidence, log_evidence_std
+
+class DataTransformer:
+    """
+    Log-transform + standardize data, with Torch tensor support.
+
+    Attributes:
+        eps   : Small constant to avoid log(0).
+        mean  : Mean of log(data) over the batch dimension.
+        std   : Std of log(data) over the batch dimension.
+    """
+
+    def __init__(self, eps=1e-12):
+        self.eps = eps
+        self.mean = None
+        self.std = None
+
+    def fit(self, data):
+        """
+        data: torch.Tensor of shape (batch, features)
+        """
+        clamp_x = torch.clamp(data, min=self.eps)
+        log_flux = torch.log(clamp_x)
+
+        # Compute mean & std over batch dimension
+        self.mean = log_flux.mean(dim=0)
+        self.std = log_flux.std(dim=0)
+
+        # Avoid division-by-zero
+        self.std = torch.clamp(self.std, min=1e-12)
+
+    def transform(self, x):
+        """
+        x: torch.Tensor (..., features)
+        """
+        clamp_x = torch.clamp(x, min=self.eps)
+        log_flux = torch.log(clamp_x)
+        # broadcasting works with any leading dims
+        return (log_flux - self.mean) / self.std
+
+    def inverse_transform(self, x_std):
+        """
+        x_std: standardized tensor (..., features)
+        """
+        log_flux = x_std * self.std + self.mean
+        return torch.exp(log_flux)
+
+    def transform_noise(self, x, noise):
+        """
+        Propagate uncertainties through log + standardization.
+
+        noise: absolute noise in original space
+        x    : flux values in original space
+
+        d(log x)/dx = 1/x
+        so sigma_log = noise / x
+
+        Then dividing by std gives:
+        sigma_std = sigma_log / std
+        """
+        return noise / (x) / self.std

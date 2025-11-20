@@ -265,37 +265,87 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     return spectra
 
 ### This needs to be made general for any model and any number of objects/atmospheric columns.
-def ARCiS_binary(obs, parameters, thread=0, **kwargs):
+def ARCiS_multiple(obs, parameters, thread=0, **kwargs):
     """
-    Simulates a binary system using the ARCiS model.
+    Generalized ARCiS multi-component model (binary, triple, ...).
 
-    This function takes observational data and parameters for two objects 
-    in a binary system, processes them using the ARCiS model, and returns 
-    the combined result of the two objects.
+    Automatically sorts components per row so that the first parameter
+    of component 1 >= component 2 >= component 3 ... etc.
 
-    Args:
-        obs: Observational data to be used as input for the ARCiS model.
-        parameters (numpy.ndarray): A 2D array where the first half of the 
-            columns correspond to the parameters for the first object, and 
-            the second half correspond to the parameters for the second object.
-        thread (int, optional): Thread identifier for parallel processing. 
-            Defaults to 0.
-        **kwargs: Additional keyword arguments to be passed to the ARCiS model.
+    Args
+    ----
+    obs : dict
+        Observational data.
+    parameters : ndarray (N_samples, N_params_total)
+        Parameters for all components stacked horizontally.
+    thread : int
+        Thread number for parallel execution.
+    kwargs :
+        - n_components : int
+        - anything else passed to ARCiS()
 
-    Returns:
-        The combined result of the ARCiS model applied to the two objects.
+    Returns
+    -------
+    combined : dict
+        Combined multi-component spectra.
     """
-    nparams = parameters.shape[1]//2
 
-    print('Computing models for object 1.')
-    object1 = ARCiS(obs, parameters[:,:nparams], thread=0, **kwargs)
+    n_components = kwargs.get("n_components", 2)
+    N_samples, N_total_params = parameters.shape
 
-    print('Computing models for object 2.')
-    object2 = ARCiS(obs, parameters[:,nparams:], thread=0, **kwargs)
+    # if N_total_params % n_components != 0:
+    #     raise ValueError(
+    #         f"Parameter count {N_total_params} not divisible by n_components={n_components}"
+    #     )
 
+    nparams = N_total_params // n_components
+
+    # ----------------------------------------------------------
+    # 1) RESHAPE: (N_samples, n_components, nparams)
+    # ----------------------------------------------------------
+    # params_3d = parameters.reshape(N_samples, n_components, nparams)
+
+    # ----------------------------------------------------------
+    # 2) SORT blocks per row by first parameter DESCENDING
+    # ----------------------------------------------------------
+    # Sorting key = params_3d[:, :, 0]  (shape = N_samples x n_components)
+    # sort_idx = np.argsort(-params_3d[:, :, 0], axis=1)  
+
+    # Gather sorted parameters
+    # row_indices = np.arange(N_samples)[:, None]
+    # params_sorted = params_3d[row_indices, sort_idx]
+
+    # ----------------------------------------------------------
+    # 3) Flatten back to original shape
+    # ----------------------------------------------------------
+    # parameters_sorted = params_sorted.reshape(N_samples, N_total_params)
+
+    # ----------------------------------------------------------
+    # 4) Evaluate ARCiS for each component
+    # ----------------------------------------------------------
+    objects = {}
+
+    for i in range(n_components):
+        print(f"Computing models for component {i+1} (sorted block)")
+
+        component_params = parameters[:, i*nparams:(i+1)*nparams]
+
+        objects[i] = ARCiS(
+            obs,
+            component_params,
+            thread=thread,
+            **kwargs
+        )
+
+    # ----------------------------------------------------------
+    # 5) Combine fluxes linearly
+    # ----------------------------------------------------------
     combined = {}
-    for k in object1.keys():
-        combined[k] = object1[k] + object2[k]
+    first_key = list(objects[0].keys())[0]
+
+    for k in objects[0]:
+        combined[k] = sum(objects[i][k] for i in range(n_components))
+
     return combined
 
 def check_ARCiS_status(proc, output_dir, n_models, thread):
