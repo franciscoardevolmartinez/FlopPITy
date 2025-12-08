@@ -17,6 +17,7 @@ from scipy.stats.qmc import LatinHypercube, Sobol
 import os
 import platform
 import time
+import copy
 
 class Retrieval():
     def __init__(self, simulator):
@@ -646,32 +647,29 @@ class Retrieval():
             - `self.post_x` is a dictionary where the processed results 
               will be stored.
         """
-        self.post_x={}
-        par_idx=0
-        for key in self.parameters.keys():
+        self.post_x=copy.deepcopy(self.x)
+
+        for par_idx,key in enumerate(self.parameters.keys()):
             if self.parameters[key]['post_processing']:
-                if 'offset' in key:
+                if key.startswith("offset"):
                     postprocessing_function = postprocessing.offset
-                    obs_key=int(key[6:])
-                    self.post_x[0] = self.x[0]
+                    obs_key = (key[len("offset_"):])
                     self.post_x[obs_key] = postprocessing_function(self.thetas[:, par_idx], 
-                                            self.obs[obs_key][:,0], self.x[obs_key])
-                elif 'scaling' in key:
+                                            self.obs[obs_key][:,0], self.post_x[obs_key])
+                elif key.startswith("scaling"):
                     postprocessing_function = postprocessing.scaling
-                    obs_key=int(key[7:])
-                    self.post_x[0] = self.x[0]
+                    obs_key = (key[len("scaling_"):])
                     self.post_x[obs_key] = postprocessing_function(self.thetas[:, par_idx], 
-                                            self.obs[obs_key][:,0], self.x[obs_key])                                
+                                            self.obs[obs_key][:,0], self.post_x[obs_key])                                
                 else:
                     postprocessing_function = getattr(postprocessing,
                                                     key)
                     for obs_key in self.x.keys():
                         self.post_x[obs_key] = postprocessing_function(self.thetas[:, par_idx], 
-                                                self.obs[obs_key][:,0], self.x[obs_key])
+                                                self.obs[obs_key][:,0], self.post_x[obs_key])
             else:
-                for obs_key in self.x.keys():
-                    self.post_x[obs_key] = self.x[obs_key]
-            par_idx+=1 
+                continue
+
 
     def psimulator(self, obs, parameters, **kwargs):
         """
