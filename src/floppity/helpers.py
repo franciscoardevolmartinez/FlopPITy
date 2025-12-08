@@ -2,8 +2,6 @@ import numpy as np
 # from geomloss import SamplesLoss
 import torch
 from scipy.special import logsumexp
-from numba import njit
-
 
 def create_obs_file(wvl, spectrum, error, *args):
     """
@@ -143,7 +141,6 @@ def find_MAP(proposal):
                        show_progress_bars=True, force_update=False
                        )
 
-# @njit
 def reduced_chi_squared(obs_dict, sim_dict, n_params=0, batch_size=500000):
     total_dof = 0
     total_chi2 = None

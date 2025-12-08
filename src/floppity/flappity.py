@@ -4,7 +4,10 @@ import matplotlib.pyplot as plt
 from sbi import utils as utils
 from sbi.neural_nets import posterior_nn
 from sbi.inference import SNPE_C
+from sbi.neural_nets import embedding_nets
+from typing import List, Optional, Tuple, Union
 from floppity import helpers
+from floppity import simulators
 from sbi.utils import RestrictedPrior, get_density_thresholder
 from floppity import postprocessing
 import multiprocessing as mp
@@ -30,6 +33,7 @@ class Retrieval():
 
         self.simulator = simulator
         self.parameters = {}
+        self.embedding= lambda x: x
 
     def save(self, fname, **options):
         """
@@ -260,6 +264,47 @@ class Retrieval():
             self.x[key] = x[key].reshape(self.n_samples, 
                                         len(self.obs[key][:,0]))
 
+    def add_CNNembedding(self, mode='auto', embed_kwargs:Optional[dict]=None):
+        
+        '''
+        If mode='auto', it builds the embedding automatically. 
+        The following are used to build it:
+        - The maximum number of convolutional layers is 4.
+        - There is one linear layer, which downsizes by 4x at mostn
+
+        - The output size is at least 5 x n_dims. If this is larger than the 
+        number of wavelengths, the output size will be n_wvls, but in this case
+        you should reconsider using an embedding.
+        - The size of the pooling kernel is determined dynamically to achieve the desired 
+        dimension reduction. 
+        '''
+
+        n_wvl = len(self.default_obs)
+        n_dims = len(self.parameters)
+        
+        if mode=='auto':
+            output_dim=min(5*n_dims, n_wvl)
+            pool_size = 2
+            n_layers = int(np.clip( np.log2(n_wvl/output_dim, 1, 4) ))
+            channels=[2**(3+i) for i in range(n_layers)]
+            linear_in=n_wvl/pool_size**n_layers
+            linear_units=int( np.clip(output_dim), linear_in/4, linear_in )
+            print(f'1D CNN embedding with auto settings. Convolutional layers: {n_layers}. Linear units: {linear_units}.')
+            embedding_net = embedding_nets.CNNEmbedding(input_shape=(n_wvl,),
+                                                         num_conv_layers= n_layers,
+                                                      out_channels_per_layer=channels,
+                                                      num_linear_layers=1,
+                                                      num_linear_units=linear_units, 
+                                                      kernel_size=3,
+                                                      output_dim=output_dim,
+                                                      pool_kernel_size=pool_size)
+        else:
+            print(f'1D CNN embedding with custom settings.')
+            embedding_net = embedding_nets.CNNEmbedding(input_shape=(n_wvl,),
+                                                         **embed_kwargs)
+            
+        self.embedding=embedding_net
+
     def density_builder(self, flow='nsf', transforms=10, hidden=50, 
                         blocks=3, bins=8, dropout=0.05, 
                         z_score_theta='independent', z_score_x='independent',
@@ -295,7 +340,9 @@ class Retrieval():
                                     dropout_probability=dropout,
                                     z_score_theta=z_score_theta,
                                     z_score_x=z_score_x,
-                                    use_batch_norm=use_batch_norm)
+                                    use_batch_norm=use_batch_norm,
+                                    embedding_net=self.embedding)
+        
         self.inference = SNPE_C(prior=self.prior, 
                                 density_estimator=self.density)
 
@@ -468,6 +515,24 @@ class Retrieval():
                 reuse_prior=reuse_prior if r == 0 else None
             )
 
+            # this is a quick hack:
+            if self.simulator==simulators.ARCiS_multiple:
+                print('Making sure that T1>T2')
+                bd1 = theta_tensor[:, :self.dims//2]
+                bd2 = theta_tensor[:, self.dims//2:]
+
+                # Determine which rows need to be swapped
+                swap_mask = bd1[:, 0] <= bd2[:, 0]
+
+                # Create an output tensor
+                theta_new = theta_tensor.clone()
+
+                # Swap rows where swap_mask is True
+                theta_new[swap_mask, :self.dims//2] = bd2[swap_mask]
+                theta_new[swap_mask, self.dims//2:] = bd1[swap_mask]
+
+                theta_tensor=theta_new
+                
             if r==0:
                 self.x_transformer = helpers.DataTransformer(eps=log_eps)
                 self.x_transformer.fit(x_tensor)
@@ -720,7 +785,7 @@ class Retrieval():
         ----------
         n_augment : int, optional
             Number of augmented copies to create for each spectrum. 
-            Default is 5.
+            Default is 1.
 
         Returns
         -------
