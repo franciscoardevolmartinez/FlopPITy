@@ -34,7 +34,7 @@ class Retrieval():
 
         self.simulator = simulator
         self.parameters = {}
-        self.embedding= lambda x: x
+        self.embedding= torch.nn.Identity()
 
     def save(self, fname, **options):
         """
@@ -280,16 +280,16 @@ class Retrieval():
         dimension reduction. 
         '''
 
-        n_wvl = len(self.default_obs)
+        n_wvl = len(self.default_obs[0])
         n_dims = len(self.parameters)
         
         if mode=='auto':
             output_dim=min(5*n_dims, n_wvl)
             pool_size = 2
-            n_layers = int(np.clip( np.log2(n_wvl/output_dim, 1, 4) ))
+            n_layers = int(np.clip( np.log2(n_wvl/output_dim), 1, 4 ))
             channels=[2**(3+i) for i in range(n_layers)]
             linear_in=n_wvl/pool_size**n_layers
-            linear_units=int( np.clip(output_dim), linear_in/4, linear_in )
+            linear_units=int( np.clip(output_dim, linear_in/4, linear_in) )
             print(f'1D CNN embedding with auto settings. Convolutional layers: {n_layers}. Linear units: {linear_units}.')
             embedding_net = embedding_nets.CNNEmbedding(input_shape=(n_wvl,),
                                                          num_conv_layers= n_layers,
@@ -342,7 +342,7 @@ class Retrieval():
                                     z_score_theta=z_score_theta,
                                     z_score_x=z_score_x,
                                     use_batch_norm=use_batch_norm,
-                                    embedding_net=self.embedding)
+                                    embedding_net = self.embedding)
         
         self.inference = SNPE_C(prior=self.prior, 
                                 density_estimator=self.density)
