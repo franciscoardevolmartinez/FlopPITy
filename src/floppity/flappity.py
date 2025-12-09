@@ -60,6 +60,7 @@ class Retrieval():
         state = self.__dict__.copy()
         state.pop('noisy_x', None)
         state.pop('post_x', None)
+        state.pop('augmented_x', None)
         state.pop('x', None)
         state.pop('thetas', None)
         return state
@@ -542,7 +543,7 @@ class Retrieval():
             os.makedirs(output_dir, exist_ok=True)
             self.save(f'{output_dir}/retrieval.pkl')
             if save_data==True:
-                pickle.dump(dict(par=self.thetas, spec=self.x), open(f'{output_dir}/data_{r}.pkl', 'wb'))
+                pickle.dump(dict(par=self.thetas, spec=self.post_x), open(f'{output_dir}/data_{r}.pkl', 'wb'))
 
             # Do IS stuff
             # if IS:
