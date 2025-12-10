@@ -288,7 +288,7 @@ class Retrieval():
             output_dim=min(5*n_dims, n_wvl)
             pool_size = 2
             n_layers = int(np.clip( np.log2(n_wvl/output_dim), 1, 4 ))
-            channels=[2**(3+i) for i in range(n_layers)]
+            channels=[2**(2+i) for i in range(n_layers)]
             linear_in=n_wvl/pool_size**n_layers
             linear_units=int( np.clip(output_dim, linear_in/4, linear_in) )
             print(f'1D CNN embedding with auto settings. Convolutional layers: {n_layers}. Linear units: {linear_units}.')
@@ -300,10 +300,14 @@ class Retrieval():
                                                       kernel_size=3,
                                                       output_dim=output_dim,
                                                       pool_kernel_size=pool_size)
-        else:
+        elif mode=='custom':
             print(f'1D CNN embedding with custom settings.')
             embedding_net = embedding_nets.CNNEmbedding(input_shape=(n_wvl,),
                                                          **embed_kwargs)
+            
+        else:
+            raise ValueError(f"Unknown mode '{mode}'. Expected 'auto' or 'custom'.")
+
             
         self.embedding=embedding_net
 
