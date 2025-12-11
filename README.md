@@ -23,7 +23,7 @@ from floppity import Retrieval
   Functionality for [ARCiS](https://github.com/michielmin/ARCiS) and [PICASO](https://natashabatalha.github.io/picaso/) comes built-in (you need to install them separately). Look further down for examples.
   
 ```python
-R = Retrieval(your_simulator_function, 'emis')
+R = Retrieval(your_simulator_function)
 ```
 
 - Read in observations and define parameters to retrieve:
@@ -57,7 +57,7 @@ fig = R.plot_corner()
 from floppity import Retrieval
 from floppity.simulators import read_ARCiS_input, ARCiS
 
-R = Retrieval(ARCiS, 'emis')
+R = Retrieval(ARCiS)
 ```
 
 - For ARCiS, the observations and parameters can be read from the ARCiS input file:
@@ -92,7 +92,7 @@ R.run(n_rounds=10, n_samples=1000, simulator_kwargs=ARCiS_kwargs)
 from floppity import Retrieval
 from floppity.simulators import read_PICASO_config, PICASO
 
-R = Retrieval(PICASO, 'emis')
+R = Retrieval(PICASO)
 
 pars, obs_list = read_PICASO_config('path/to/config.toml')
 R.get_obs(obs_list)
@@ -142,6 +142,10 @@ def simulator(obs, parameters, **kwargs):
 ```python
 R.add_parameter('RV', -100, 100, post_process=True) # km/s
 ```
+- For offsets and scalings between different observations, the parameters should be named 'offset_{observation_key}'. For example, if we wanted to fit for a scaling factor between 0.95 and 1.05:
+
+```python
+R.add_parameter('scaling_obs2', 0.95, 1.05, post_process=True)
 
 
 
