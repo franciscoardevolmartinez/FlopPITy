@@ -308,7 +308,6 @@ class Retrieval():
         else:
             raise ValueError(f"Unknown mode '{mode}'. Expected 'auto' or 'custom'.")
 
-            
         self.embedding=embedding_net
 
     def density_builder(self, flow='nsf', transforms=10, hidden=50, 
