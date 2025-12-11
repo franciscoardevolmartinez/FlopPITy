@@ -28,9 +28,9 @@ class Retrieval():
             and an array of parameters of shape (n_samples, n_dims).
             Additionally, it must return a dictionary with the same keys
             as the observation.
-
-        obs_type (str): either 'emis' or 'trans'
         """
+
+        print(f'Retrieval object created with simulator {simulator}. You can now add observations and parameters to fit.')
 
         self.simulator = simulator
         self.parameters = {}
