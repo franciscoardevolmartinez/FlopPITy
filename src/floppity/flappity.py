@@ -644,7 +644,7 @@ class Retrieval():
 
         Note:
             - `self.parameters` is expected to be a dictionary where each 
-              key maps to a dictionary containing a `post_process` key that 
+              key maps to a dictionary containing a `post_processing` key that 
               specifies the name of the post-processing function.
             - `self.x` is expected to be a dictionary of observations to be 
               processed.
