@@ -30,8 +30,6 @@ class Retrieval():
             as the observation.
         """
 
-        print(f'Retrieval object created with simulator {simulator}. You can now add observations and parameters to fit.')
-
         self.simulator = simulator
         self.parameters = {}
         self.embedding= torch.nn.Identity()
