@@ -486,8 +486,8 @@ def read_PICASO_config(config_file):
 
     for i,key in enumerate(fitpars.keys()):
         if fitpars[key]['prior'] == 'uniform':
-            minn=fitpars[key]['min']
-            maxx=fitpars[key]['max']
+            minn=fitpars[key]['uniform_kwargs']['min']
+            maxx=fitpars[key]['uniform_kwargs']['max']
             
             if fitpars[key]['log']:
                 # minn=10**minn

@@ -3,6 +3,8 @@ from scipy.ndimage import gaussian_filter1d
 import scipy.interpolate as sci
 from typing import List
 
+_bb_buffer = {}
+
 def enforce_list_length(expected_length):
     def decorator(func):
         func.expected_length = expected_length
@@ -241,6 +243,40 @@ def instrumental_broadening(broadening, wvl, flux_array, **kwargs):
     broadened_flux = np.array([gaussian_filter1d(flux, sigma / np.mean(np.diff(wvl))) for flux in flux_array])
 
     return broadened_flux
+
+
+def add_bb_T(T, wvl, flux, obs=None):
+    _bb_buffer[obs] = T
+    return flux
+
+def add_bb_A(A, wvl, flux, obs=None):
+    T = _bb_buffer.pop(obs, None)
+
+    if T is None:
+        raise ValueError("add_bb_A called before add_bb_T")
+
+    return _compute_bb(T, A, wvl, flux)
+
+def _compute_bb(T, A, wvl, flux):
+
+    h = 6.62607015e-34
+    c = 2.99792458e8
+    k = 1.380649e-23
+
+    wvl_m = wvl * 1e-6
+
+    wvl_grid = wvl_m[None, :]
+    T_grid = T[:, None]
+    A_grid = A[:, None]
+
+    bb = (2.0 * h * c**2) / (wvl_grid**5) / (
+        np.exp((h * c) / (wvl_grid * k * T_grid)) - 1.0
+    )
+
+    bb_flux = A_grid * 1e26 * (wvl_grid**2 / c) * bb
+
+    return flux + bb_flux
+
 
 @enforce_list_length(2)
 def add_bb(pars: List[float], wvl, flux):

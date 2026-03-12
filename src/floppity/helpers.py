@@ -2,6 +2,7 @@ import numpy as np
 # from geomloss import SamplesLoss
 import torch
 from scipy.special import logsumexp
+from sklearn.decomposition import TruncatedSVD
 
 def create_obs_file(wvl, spectrum, error, *args):
     """
@@ -339,7 +340,7 @@ def IS_evidence(weights):
 
     return log_evidence, log_evidence_std
 
-class DataTransformer:
+class LogDataTransformer:
     """
     Log-transform + standardize data, with Torch tensor support.
 
@@ -349,7 +350,7 @@ class DataTransformer:
         std   : Std of log(data) over the batch dimension.
     """
 
-    def __init__(self, eps=1e-12):
+    def __init__(self, eps=1e-20):
         self.eps = eps
         self.mean = None
         self.std = None
@@ -398,3 +399,97 @@ class DataTransformer:
         sigma_std = sigma_log / std
         """
         return noise / (x) / self.std
+    
+class DataTransformer:
+    """
+    Standardize data, with Torch tensor support.
+
+    Attributes
+        mean  : Mean of log(data) over the batch dimension.
+        std   : Std of log(data) over the batch dimension.
+    """
+
+    def __init__(self):
+        self.mean = None
+        self.std = None
+
+    def fit(self, data):
+        """
+        data: torch.Tensor of shape (batch, features)
+        """
+        if not isinstance(data, torch.Tensor):
+            data = torch.as_tensor(data, dtype=torch.float32)
+        # Compute mean & std over batch dimension
+        self.mean = data.mean(dim=0)
+        self.std = data.std(dim=0)
+
+        # Avoid division-by-zero
+        # self.std = torch.clamp(self.std, min=1e-20)
+
+    def transform(self, x):
+        """
+        x: torch.Tensor (..., features)
+        """
+        if not isinstance(x, torch.Tensor):
+            x = torch.as_tensor(x, dtype=torch.float32)
+        # broadcasting works with any leading dims
+        return (x - self.mean) / self.std
+
+    def inverse_transform(self, x_std):
+        """
+        x_std: standardized tensor (..., features)
+        """
+        x = x_std * self.std + self.mean
+        return x
+
+    def transform_noise(self, x, noise):
+        """
+        Propagate uncertainties through standardization.
+
+        noise: absolute noise in original space
+        x    : flux values in original space
+        """
+        return noise / self.std
+    
+class pca_wrapper():
+    ''''
+    Wrapper for sklearn's pca to work with the observation dictionaries as inputs.
+    '''
+    def __init__(self, n_pca):
+        self.svd = TruncatedSVD(n_components=n_pca)
+
+    def _dict_to_matrix(self, obs):
+        """
+        Concatenate dictionary spectra into a single matrix.
+        """
+  
+        self.obs_keys = list(obs.keys())
+        self.obs_shapes = {k: obs[k].shape[1] for k in self.obs_keys}
+
+        arrays = [obs[k] for k in self.obs_keys]
+        return np.concatenate(arrays, axis=1)
+
+    def fit(self, obs):
+        X = self._dict_to_matrix(obs)
+        self.svd.fit(X)
+    
+    def transform(self, obs):
+        X = self._dict_to_matrix(obs)
+        return self.svd.transform(X)
+    
+    def inverse_transform(self, components):
+        """
+        Reconstruct spectra and return dictionary with original structure.
+        """
+        X_rec = self.svd.inverse_transform(components)
+
+        out = {}
+        start = 0
+        for k in self.obs_keys:
+            w = self.obs_shapes[k]
+            out[k] = X_rec[:, start:start+w]
+            start += w
+        return out
+    
+    def get_pca(self):
+        return self.svd

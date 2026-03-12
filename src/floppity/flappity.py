@@ -18,9 +18,10 @@ import os
 import platform
 import time
 import copy
+from sklearn.preprocessing import StandardScaler
 
 class Retrieval():
-    def __init__(self, simulator):
+    def __init__(self, simulator, do_pca=False):
         """
         simulator (callable): A function or callable object that 
             simulates data based on the provided parameters. 
@@ -33,6 +34,8 @@ class Retrieval():
         self.simulator = simulator
         self.parameters = {}
         self.embedding= torch.nn.Identity()
+        self.do_pca=do_pca
+        self.x_transformer = helpers.LogDataTransformer() if not self.do_pca else helpers.DataTransformer()
 
     def save(self, fname, **options):
         """
@@ -359,6 +362,13 @@ class Retrieval():
             The trained density estimator is stored in `self.density`.
         """
 
+
+        if not isinstance(theta, torch.Tensor):
+            theta = torch.as_tensor(theta, dtype=torch.float32)
+
+        if not isinstance(x, torch.Tensor):
+            x = torch.as_tensor(x, dtype=torch.float32)
+
         self.posterior_estimator = self.inference.append_simulations(theta, x, 
                                           proposal=proposal).train(show_train_summary=True,
                               **kwargs)
@@ -384,6 +394,9 @@ class Retrieval():
             Posterior distribution built from the inference object, 
             conditioned on `self.default_obs`.
         """
+        # if self.do_pca:
+            
+
         self.default_obs_norm = self.x_transformer.transform(torch.tensor(self.default_obs,dtype=torch.float32 ))
 
         self.posterior=self.inference.build_posterior(
@@ -451,6 +464,9 @@ class Retrieval():
         # Postprocessing
         self.do_postprocessing()
         self.augment(n_aug)
+
+        # fit PCA here
+
         self.add_noise()
 
         # Convert to tensors
@@ -458,11 +474,11 @@ class Retrieval():
         x_tensor = torch.tensor(np.concatenate(list(self.noisy_x.values()), axis=1), dtype=torch.float32)
         return theta_tensor, x_tensor
 
-    def run(self, n_threads=1, n_samples=1024, n_samples_init=None, log_eps=1e-12,
+    def run(self, n_threads=1, n_samples=1024, n_samples_init=None,
                         resume=False, n_rounds=3, n_aug=1, flow_kwargs=dict(), 
                         training_kwargs=dict(), simulator_kwargs=dict(), output_dir='output_FlopPITy',
                         save_data=False, sample_prior_method='sobol',
-                        reuse_prior=None, IS=True
+                        reuse_prior=None, IS=True, n_pca=100
                         ):
         """
         Executes the retrieval process over multiple rounds, 
@@ -484,6 +500,7 @@ class Retrieval():
             internal methods will propagate up to the caller.
         """
         self.n_threads=n_threads
+        self.n_pca=n_pca
 
         if n_samples_init==None:
             n_samples_init=n_samples
@@ -535,17 +552,30 @@ class Retrieval():
                 theta_new[swap_mask, self.dims//2:] = bd1[swap_mask]
 
                 theta_tensor=theta_new
-                
-            if r==0:
-                self.x_transformer = helpers.DataTransformer(eps=log_eps)
-                self.x_transformer.fit(x_tensor)
 
-            # Save
+            print('Saving data...')
             os.makedirs(output_dir, exist_ok=True)
             self.save(f'{output_dir}/retrieval.pkl')
             if save_data==True:
-                pickle.dump(dict(par=self.thetas, spec=self.post_x), open(f'{output_dir}/data_{r}.pkl', 'wb'))
+                try:
+                    with open(f'{output_dir}/data_{r}.pkl', 'wb') as f:
+                        pickle.dump(dict(par=self.thetas, spec=self.post_x), f)
+                except Exception as e:
+                    print("Pickle failed:", e)
 
+
+            # if doing PCA, train PCA on first round data
+            if r==0 and self.do_pca:
+                self.pca = helpers.pca_wrapper(self.n_pca)
+                self.pca.fit(self.augmented_x)
+                self.svd = self.pca.get_pca()
+                self.default_obs = self.svd.transform(self.default_obs)
+
+            if r==0:
+                self.x_transformer.fit(self.svd.transform(x_tensor))
+
+            # Save
+            
             # Do IS stuff
             # if IS:
             #     n_eff, sampling_efficiency, logZ, dlogZ= self.run_IS()
@@ -555,9 +585,12 @@ class Retrieval():
             #     print(f'ε = {sampling_efficiency:.3g}')
             #     print(f'log(Z) = {logZ:.3g} +- {dlogZ:.3g}')
 
-            x_std_tensor = self.x_transformer.transform(x_tensor)
-                
-            self.train(theta_tensor, x_std_tensor, proposal, **training_kwargs)
+            x_train_tensor = self.x_transformer.transform(self.svd.transform(x_tensor))
+
+            if self.do_pca:
+                x_train_tensor = self.x_transformer.transform(self.pca.transform(self.noisy_x))
+
+            self.train(theta_tensor, x_train_tensor, proposal, **training_kwargs)
             
             self.get_posterior()
             proposal = self.posterior.set_default_x(self.default_obs_norm)
@@ -662,7 +695,17 @@ class Retrieval():
                     postprocessing_function = postprocessing.scaling
                     obs_key = (key[len("scaling_"):])
                     self.post_x[obs_key] = postprocessing_function(self.thetas[:, par_idx], 
-                                            self.obs[obs_key][:,0], self.post_x[obs_key])                                
+                                            self.obs[obs_key][:,0], self.post_x[obs_key])
+                elif key.startswith("add_bb"):
+                    postprocessing_function = getattr(postprocessing,
+                                                    key)   
+                    for obs_key in self.x.keys():
+                        self.post_x[obs_key] = postprocessing_function(
+                            self.thetas[:, par_idx],
+                            self.obs[obs_key][:,0],
+                            self.post_x[obs_key],
+                            obs=obs_key
+                        )                             
                 else:
                     postprocessing_function = getattr(postprocessing,
                                                     key)
@@ -671,7 +714,6 @@ class Retrieval():
                                                 self.obs[obs_key][:,0], self.post_x[obs_key])
             else:
                 continue
-
 
     def psimulator(self, obs, parameters, **kwargs):
         """
