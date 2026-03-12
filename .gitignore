@@ -193,3 +193,4 @@ src/floppity/data/obs_3
 src/floppity/version.py
 examples/output_FlopPITy/retrieval.pkl
 examples/output_FlopPITy/data_0.pkl
+examples/ensemble.ipynb

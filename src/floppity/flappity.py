@@ -570,9 +570,12 @@ class Retrieval():
                 self.pca.fit(self.augmented_x)
                 self.svd = self.pca.get_pca()
                 self.default_obs = self.svd.transform(self.default_obs)
-
-            if r==0:
                 self.x_transformer.fit(self.svd.transform(x_tensor))
+            elif r==0:
+                self.x_transformer.fit(x_tensor)
+
+            # if r==0:
+            #     self.x_transformer.fit(self.svd.transform(x_tensor))
 
             # Save
             
@@ -584,8 +587,10 @@ class Retrieval():
             #     self.dlogZ.append(dlogZ)
             #     print(f'ε = {sampling_efficiency:.3g}')
             #     print(f'log(Z) = {logZ:.3g} +- {dlogZ:.3g}')
-
-            x_train_tensor = self.x_transformer.transform(self.svd.transform(x_tensor))
+            if self.do_pca:
+                x_train_tensor = self.x_transformer.transform(self.svd.transform(x_tensor))
+            else:
+                x_train_tensor = self.x_transformer.transform(x_tensor)
 
             if self.do_pca:
                 x_train_tensor = self.x_transformer.transform(self.pca.transform(self.noisy_x))
