@@ -232,6 +232,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
 
     # Initialize spectra output
     spectra = {k: [] for k in obs_indices}
+    atmospheres = []
 
     print('Reading ARCiS output...')
     for i in trange(n_spectra):
@@ -243,10 +244,17 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
             except Exception as e:
                 print(f'Warning: Could not read {obs_file} in {model_dir}: {e}')
                 phase = -1 * np.ones_like(obs[k][:, 1])  # fallback
+            try:
+                atmospheres.append(np.loadtxt(os.path.join(model_dir, 'mixingratios.dat')))
+            except Exception as e:
+                print(f'Warning: Could not read "mixingratios.dat" in {model_dir}: {e}')
             spectra[k].append(phase)
 
     for k in spectra:
         spectra[k] = np.array(spectra[k])  # shape: (n_spectra, n_points)
+
+    with open(f'atmosphere_{thread}.npy', 'wb') as file:
+        np.save(file, atmospheres)
 
     #Remove files
     print('Removing files...')

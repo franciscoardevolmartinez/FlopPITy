@@ -493,3 +493,53 @@ class pca_wrapper():
     
     def get_pca(self):
         return self.svd
+
+class LogitTransformer:
+    """
+    Applies a logit transform to map bounded parameters [a,b] to (-inf, +inf),
+    and provides an inverse transform to go back to natural units.
+
+    Usage:
+        logit_transformer = LogitTransformer(lows, highs)
+        theta_logit = logit_transformer.transform(theta_natural)
+        theta_natural = logit_transformer.inverse_transform(theta_logit)
+    """
+
+    def __init__(self, lows, highs):
+        """
+        Args:
+            lows: torch.Tensor of shape (num_params,) with lower bounds
+            highs: torch.Tensor of shape (num_params,) with upper bounds
+        """
+        self.lows = torch.tensor(lows, dtype=torch.float32)
+        self.highs = torch.tensor(highs, dtype=torch.float32)
+        assert self.lows.shape == self.highs.shape, "Low/high bounds must match shape"
+
+    def transform(self, theta):
+        """
+        Forward logit transform: [a,b] -> (-inf, inf)
+
+        Args:
+            theta: torch.Tensor of shape (..., num_params)
+
+        Returns:
+            torch.Tensor of same shape, logit-transformed
+        """
+        # Ensure theta is broadcastable
+        a = self.lows
+        b = self.highs
+        return torch.log((theta - a) / (b - theta))
+
+    def inverse_transform(self, theta_logit):
+        """
+        Inverse logit transform: (-inf, inf) -> [a,b]
+
+        Args:
+            theta_logit: torch.Tensor of shape (..., num_params)
+
+        Returns:
+            torch.Tensor of same shape, in natural units
+        """
+        a = self.lows
+        b = self.highs
+        return a + (b - a) / (1 + torch.exp(-theta_logit))

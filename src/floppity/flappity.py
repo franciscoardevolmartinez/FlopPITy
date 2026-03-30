@@ -21,7 +21,7 @@ import copy
 from sklearn.preprocessing import StandardScaler
 
 class Retrieval():
-    def __init__(self, simulator, do_pca=False):
+    def __init__(self, simulator, do_pca=False, obs_type='emission'):
         """
         simulator (callable): A function or callable object that 
             simulates data based on the provided parameters. 
@@ -29,6 +29,11 @@ class Retrieval():
             and an array of parameters of shape (n_samples, n_dims).
             Additionally, it must return a dictionary with the same keys
             as the observation.
+        
+        do_pca (bool): Whether to fit a given number of principal components
+            or the actual spectrum. Recommended for high-dimensional datasets.
+
+        obs_type (string): One of 'emission' or 'transmission'.
         """
 
         self.simulator = simulator
@@ -162,6 +167,52 @@ class Retrieval():
         self.parameters[parname]['log']=log_scale
         self.parameters[parname]['post_processing']=post_process
         self.parameters[parname]['universal']=universal
+
+    # def create_prior(self):
+    #     """
+    #     Constructs a uniform prior distribution based on the min and max
+    #     values of parameters in self.parameters.
+    #     Applies a logit transform to map bounded parameters to an unbounded gaussian.
+
+    #     Notes:
+    #         - Logit transform: theta' = log((theta - a) / (b - theta))
+    #     """
+    #     self.dims = len(self.parameters)
+    #     low = np.empty((self.dims,))
+    #     high = np.empty((self.dims,))
+
+    #     # Collect bounds
+    #     for i, key in enumerate(self.parameters.keys()):
+    #         low[i] = self.parameters[key]['min']
+    #         high[i] = self.parameters[key]['max']
+
+    #     # Convert to torch tensors
+    #     low = torch.tensor(low.reshape(1, -1), dtype=torch.float32)
+    #     high = torch.tensor(high.reshape(1, -1), dtype=torch.float32)
+
+    #     # Define a logit transform for each dimension
+    #     def logit_transform(x, a, b):
+    #         # Map [a,b] -> (-inf, +inf)
+    #         return torch.log((x - a) / (b - x))
+    #     def inv_logit_transform(y, a, b):
+    #         return a + (b - a) / (1 + torch.exp(-y))
+
+    #     # Save transforms for later usage (inverse required for sampling)
+    #     # self.prior_transform = {
+    #     #     key: (low[i], high[i]) for i, key in enumerate(self.parameters.keys())
+    #     # }
+
+    #     # Create a BoxUniform in original space
+    #     base_prior = utils.BoxUniform(low=low, high=high)
+
+    #     # Wrap it in a TransformedDistribution applying logit
+    #     self.prior = utils.TransformedDistribution(
+    #         base_prior,
+    #         transforms=[lambda x, i=i: logit_transform(x[:, i], low[0, i], high[0, i]) 
+    #                     for i in range(self.dims)]
+    #     )
+
+    #     self.theta_transformer = helpers.LogitTransformer(low, high)
 
     def create_prior(self):
         """
@@ -478,7 +529,7 @@ class Retrieval():
                         resume=False, n_rounds=3, n_aug=1, flow_kwargs=dict(), 
                         training_kwargs=dict(), simulator_kwargs=dict(), output_dir='output_FlopPITy',
                         save_data=False, sample_prior_method='sobol',
-                        reuse_prior=None, IS=True, n_pca=100
+                        reuse_prior=None, IS=True, n_pca=100, alpha=0
                         ):
         """
         Executes the retrieval process over multiple rounds, 
@@ -563,11 +614,10 @@ class Retrieval():
                 except Exception as e:
                     print("Pickle failed:", e)
 
-
             # if doing PCA, train PCA on first round data
             if r==0 and self.do_pca:
                 self.pca = helpers.pca_wrapper(self.n_pca)
-                self.pca.fit(self.augmented_x)
+                self.pca.fit(self.noisy_x)
                 self.svd = self.pca.get_pca()
                 self.default_obs = self.svd.transform(self.default_obs)
                 self.x_transformer.fit(self.svd.transform(x_tensor))
@@ -592,14 +642,12 @@ class Retrieval():
             else:
                 x_train_tensor = self.x_transformer.transform(x_tensor)
 
-            if self.do_pca:
-                x_train_tensor = self.x_transformer.transform(self.pca.transform(self.noisy_x))
-
             self.train(theta_tensor, x_train_tensor, proposal, **training_kwargs)
             
             self.get_posterior()
-            proposal = self.posterior.set_default_x(self.default_obs_norm)
-            self.proposals.append(self.posterior)
+            posterior = self.posterior.set_default_x(self.default_obs_norm)
+            proposal = _MixtureProposal(self.prior, posterior, alpha)
+            self.proposals.append(proposal)
             self.loss_val=self.inference._summary['best_validation_loss']
 
     def _sample_initial_thetas(self, method, n_samples):
@@ -858,5 +906,38 @@ def _run_single_chunk(args):
     time.sleep(thread_idx * 0.05)
     return simulator_func(obs, parameters_chunk, thread_idx, **kwargs)
 
+def _sample_mixture(prior, posterior, num_samples, alpha):
+    n_prior = int(alpha * num_samples)
+    n_post = num_samples - n_prior
 
+    theta_prior = prior.sample((n_prior,))
+    theta_post = posterior.sample((n_post,))
+
+    # Ensure both are (N, D)
+    if theta_post.ndim == 3:
+        theta_post = theta_post.squeeze(1)
+
+    if theta_prior.ndim == 3:
+        theta_prior = theta_prior.squeeze(1)
+
+    return torch.cat([theta_prior, theta_post], dim=0)
+class _MixtureProposal:
+    def __init__(self, prior, posterior, alpha):
+        self.prior = prior
+        self.posterior = posterior
+        self.alpha = alpha
+
+    def sample(self, shape):
+        return _sample_mixture(self.prior, self.posterior, shape[0], self.alpha)
+
+    def log_prob(self, theta):
+        log_p_prior = self.prior.log_prob(theta)
+        log_p_post = self.posterior.log_prob(theta)
+
+        stacked = torch.stack([
+            log_p_prior + torch.log(torch.tensor(self.alpha)),
+            log_p_post + torch.log(torch.tensor(1 - self.alpha))
+        ], dim=0)
+
+        return torch.logsumexp(stacked, dim=0)
 
