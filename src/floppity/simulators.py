@@ -254,7 +254,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     for k in spectra:
         spectra[k] = np.array(spectra[k])  # shape: (n_spectra, n_points)
 
-    atmo_file = os.path.join(output_dir, f'atmosphere_{thread}.npy')
+    atmo_file = os.path.join(output_dir, f'atmosphere_{thread}_{next_log_num}.npy')
     with open(atmo_file, 'wb') as file:
         np.save(file, atmospheres)
 
