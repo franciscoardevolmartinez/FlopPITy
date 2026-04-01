@@ -568,6 +568,7 @@ class Retrieval():
             self.create_prior()
             r0 = 0
             self.proposals=[self.prior]
+            self.posteriors=[]
             self.density_builder(**flow_kwargs)
             proposal=self.prior
 
@@ -648,6 +649,7 @@ class Retrieval():
             posterior = self.posterior.set_default_x(self.default_obs_norm)
             proposal = _MixtureProposal(self.prior, posterior, alpha)
             self.proposals.append(proposal)
+            self.posteriors.append(posterior)
             self.loss_val=self.inference._summary['best_validation_loss']
 
     def _sample_initial_thetas(self, method, n_samples):

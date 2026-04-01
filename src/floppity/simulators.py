@@ -250,10 +250,12 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
                 print(f'Warning: Could not read "mixingratios.dat" in {model_dir}: {e}')
             spectra[k].append(phase)
 
+    
     for k in spectra:
         spectra[k] = np.array(spectra[k])  # shape: (n_spectra, n_points)
 
-    with open(f'atmosphere_{thread}.npy', 'wb') as file:
+    atmo_file = os.path.join(output_dir, f'atmosphere_{thread}.npy')
+    with open(atmo_file, 'wb') as file:
         np.save(file, atmospheres)
 
     #Remove files
