@@ -359,10 +359,14 @@ def _append_arcis_atmosphere_structure(
     with open(source_path, 'r') as source:
         contents = source.read().rstrip()
 
+    columns = _arcis_atmosphere_columns(contents)
+    contents = _arcis_atmosphere_numeric_contents(contents)
     parameter_text = ' '.join(f'{value:.17g}' for value in np.asarray(parameters))
     with open(output_path, 'a') as destination:
         fcntl.flock(destination, fcntl.LOCK_EX)
         try:
+            if columns:
+                destination.write(f'# columns={" ".join(columns)}\n')
             destination.write(
                 f'# round={round_index} '
                 f'global_model={global_model_index} '
@@ -374,3 +378,36 @@ def _append_arcis_atmosphere_structure(
             destination.write('\n\n')
         finally:
             fcntl.flock(destination, fcntl.LOCK_UN)
+
+
+def _arcis_atmosphere_columns(contents):
+    for line in contents.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        candidate = stripped.lstrip('#').strip()
+        tokens = [
+            token
+            for token in candidate.split()
+            if not (token.startswith('[') and token.endswith(']'))
+        ]
+        if len(tokens) >= 2 and any(char.isalpha() for char in ''.join(tokens)):
+            return tokens
+    return []
+
+
+def _arcis_atmosphere_numeric_contents(contents):
+    numeric_lines = []
+    for line in contents.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith('#'):
+            continue
+        try:
+            float(stripped.split()[0])
+        except (ValueError, IndexError):
+            continue
+        numeric_lines.append(line)
+    return '\n'.join(numeric_lines)

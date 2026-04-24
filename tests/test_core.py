@@ -16,6 +16,8 @@ from floppity.helpers import (
 from floppity.output import RetrievalOutput
 from floppity.simulators import (
     ARCiS,
+    _arcis_atmosphere_columns,
+    _arcis_atmosphere_numeric_contents,
     _append_arcis_atmosphere_structure,
     _arcis_obs_file_name,
     read_ARCiS_input,
@@ -253,8 +255,24 @@ class TestHelpers(unittest.TestCase):
                 contents = file.read()
 
         self.assertIn("# round=0 global_model=5 thread=1 local_model=2", contents)
+        self.assertIn("# columns=pressure h2o", contents)
         self.assertIn("parameters=1000 -3", contents)
-        self.assertIn("pressure h2o\n1e-3 1e-4", contents)
+        self.assertIn("1e-3 1e-4", contents)
+        self.assertNotIn("\npressure h2o\n", contents)
+
+    def test_arcis_atmosphere_columns_parse_header_units(self):
+        contents = "#    T [K]      P [bar]     H2O            CH4\n1000 1e-3 1e-4 1e-6\n"
+        self.assertEqual(
+            _arcis_atmosphere_columns(contents),
+            ["T", "P", "H2O", "CH4"],
+        )
+
+    def test_arcis_atmosphere_numeric_contents_drops_header(self):
+        contents = "#    T [K]      P [bar]     H2O\n1000 1e-3 1e-4\n"
+        self.assertEqual(
+            _arcis_atmosphere_numeric_contents(contents),
+            "1000 1e-3 1e-4",
+        )
 
     def test_arcis_obs_file_name_mapping(self):
         self.assertEqual(_arcis_obs_file_name(0), "obs001")
