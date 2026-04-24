@@ -1,704 +1,540 @@
+import os
+import time
+import multiprocessing as mp
+
+import cloudpickle as pickle
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-from sbi import utils as utils
-from sbi.neural_nets import posterior_nn
-from sbi.inference import SNPE_C
+from scipy.stats.qmc import LatinHypercube, Sobol
+
 from floppity import helpers
-from sbi.utils import RestrictedPrior, get_density_thresholder
 from floppity import postprocessing
 from floppity import preprocessing
-import multiprocessing as mp
-import cloudpickle as pickle
-from corner import corner
-from scipy.stats.qmc import LatinHypercube, Sobol
-import os
-import platform
-import time
 
-class Retrieval():
+
+TRANSIENT_STATE = {
+    "noisy_x",
+    "post_x",
+    "x",
+    "nat_thetas",
+    "thetas",
+    "augmented_x",
+    "augmented_thetas",
+}
+
+
+class Retrieval:
+    """Simulation-based atmospheric retrieval driver."""
+
     def __init__(self, simulator, obs_type):
         """
-        simulator (callable): A function or callable object that 
-            simulates data based on the provided parameters. 
-            The simulator must take as input the observation dictionary
-            and an array of parameters of shape (n_samples, n_dims).
-            Additionally, it must return a dictionary with the same keys
-            as the observation.
-
-        obs_type (str): either 'emis' or 'trans'
+        Parameters
+        ----------
+        simulator : callable
+            Function that accepts ``obs`` and an array of natural parameters
+            with shape ``(n_samples, n_dims)`` and returns simulated spectra
+            keyed like ``obs``.
+        obs_type : str
+            Observation type, either ``"emis"`` or ``"trans"``.
         """
-
         self.simulator = simulator
         self.parameters = {}
-        self.preprocessing=None
-        self.obs_type=obs_type
+        self.preprocessing = None
+        self.obs_type = obs_type
+        self.completed_rounds = 0
 
     def save(self, fname, **options):
-        """
-        Save the current object to a file using pickle.
-
-        Args:
-            fname (str): The file path where the object will be saved.
-            **options: Additional options for future extensions.
-
-        Raises:
-            IOError: If the file cannot be written.
-        """
-        with open(fname, 'wb') as file:
+        """Save this retrieval object with cloudpickle."""
+        _ = options
+        with open(fname, "wb") as file:
             pickle.dump(self, file)
 
     def __getstate__(self):
-        """
-        Customize object state for pickling by excluding specific attributes.
-
-        Removes 'noisy_x', 'post_x', 'x', 'nat_thetas', and 'thetas' from 
-        the object's state dictionary before serialization.
-        """
+        """Drop large per-round arrays before pickling."""
         state = self.__dict__.copy()
-        state.pop('noisy_x', None)
-        state.pop('post_x', None)
-        state.pop('x', None)
-        state.pop('nat_thetas', None)
-        state.pop('thetas', None)
+        for key in TRANSIENT_STATE:
+            state.pop(key, None)
         return state
 
     def __setstate__(self, state):
-        """
-        Restore the object's state from the provided state dictionary.
-
-        Args:
-            state (dict): The state dictionary containing attributes to 
-            restore.
-        """
+        """Restore a pickled retrieval object."""
         self.__dict__.update(state)
+        self.completed_rounds = getattr(
+            self, "completed_rounds", max(len(getattr(self, "proposals", [])) - 1, 0)
+        )
 
-    @classmethod   
+    @classmethod
     def load(cls, fname):
-        """
-        Load an object from a file using pickle.
+        """Load a retrieval object from disk."""
+        with open(fname, "rb") as file:
+            return pickle.load(file)
 
-        Args:
-            fname (str): The path to the file to load.
-
-        Returns:
-            object: The object loaded from the file.
-        """
-        with open(fname, 'rb') as f:
-            return pickle.load(f)
-    
     def get_obs(self, fnames, error_inflation=1):
-        '''
-        Read observation(s) to run retrievals on. Needs to be in the 
-        format required by the simulator used.
-
-        Parameters
-        ----------
-        fnames : list of strings
-            list with the locations of all observations to analyze
-
-        Returns
-        -------
-        obs : dict
-            dictionary with all the observations, keyed 0, 1, 2...
-        '''
-        self.obs={}
+        """Read observation files and store them in ``self.obs``."""
+        self.obs = {i: np.loadtxt(fname) for i, fname in enumerate(fnames)}
         self.error_inflation = error_inflation
-        for i in range(len(fnames)):
-            self.obs[i] = np.loadtxt(fnames[i])
-        
-        if self.obs_type == 'emis':
-            for key in self.obs.keys():
-                self.obs[key][self.obs[key] <= 0] = 1e-12
 
-        self.default_obs=np.concatenate(list(self.obs.values()), 
-                                        axis=0)[:,1].reshape(1,-1)
-         
-    def add_parameter(self, parname, min_value, max_value, 
-                      log_scale=False, post_process=False, 
-                      universal=True):
-        """
-        Add a parameter to the internal parameter dictionary.
+        if self.obs_type == "emis":
+            for obs in self.obs.values():
+                obs[obs <= 0] = 1e-12
 
-        Parameters
-        ----------
-        parname : str
-            Name of the parameter to add.
-        min_value : float
-            Minimum allowed value for the parameter.
-        max_value : float
-            Maximum allowed value for the parameter.
-        log_scale : bool, optional
-            If True, indicates that the parameter should be sampled 
-            logarithmically. Default is False.
-        post_process : bool, optional
-            If True, it indicates that this is a parameter from a 
-            post-processing function and not the simulator. 
-            Default is False.
-        universal : bool, optional
-            Only used when combining multiple models. If True, the 
-            parameter is kept the same for all models. Default is True.
+        self.default_obs = self._concat_obs_values(self.obs).reshape(1, -1)
 
-        Returns
-        -------
-        None
-        """
-        self.parameters[parname]={}
-        self.parameters[parname]['min']=min_value
-        self.parameters[parname]['max']=max_value
-        self.parameters[parname]['log']=log_scale
-        self.parameters[parname]['post_processing']=post_process
-        self.parameters[parname]['universal']=universal
+    def add_parameter(
+        self,
+        parname,
+        min_value,
+        max_value,
+        log_scale=False,
+        post_process=False,
+        universal=True,
+    ):
+        """Add one retrieval parameter and its unit-cube transform metadata."""
+        self.parameters[parname] = {
+            "min": min_value,
+            "max": max_value,
+            "log": log_scale,
+            "post_processing": post_process,
+            "universal": universal,
+        }
 
     def get_thetas(self, proposal, n_samples):
-        """
-        Draw a set of parameter samples (thetas) from the proposal 
-        distribution.
-
-        Parameters
-        ----------
-        proposal : object
-            A proposal distribution object that implements a `sample(n)`
-              method.
-
-        n_samples : int
-            The number pf parameter vectors to draw.
-
-        Returns
-        -------
-        None
-            The sampled parameter vectors are stored in `self.thetas`.
-        """
-        self.n_samples=n_samples
+        """Sample unit-cube parameters from ``proposal``."""
+        self.n_samples = n_samples
         thetas = proposal.sample((self.n_samples,))
-        self.thetas=thetas.cpu().detach().numpy().reshape([-1, len(self.parameters)])
+        self.thetas = thetas.cpu().detach().numpy().reshape(-1, len(self.parameters))
         self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
-    
+
     def lhs_thetas(self, n_samples):
-        """
-        Generate Latin Hypercube samples for parameter space.
-
-        This method creates `n_samples` samples using a Latin Hypercube 
-        sampling strategy based on the dimensions of the `parameters` 
-        attribute. The generated samples are stored in `self.thetas`, 
-        and their natural parameter space equivalents are stored in 
-        `self.nat_thetas`.
-
-        Args:
-            n_samples (int): Number of samples to generate.
-
-        Attributes:
-            thetas (ndarray): Generated samples in the unit hypercube.
-            nat_thetas (ndarray): Samples converted to natural parameter 
-                space.
-        """
-        self.n_samples=n_samples
-        dims = len(self.parameters)
-        sampler = LatinHypercube(d=dims, optimization='random-cd')
+        """Generate Latin hypercube samples in the unit cube."""
+        self.n_samples = n_samples
+        sampler = LatinHypercube(d=len(self.parameters), optimization="random-cd")
         self.thetas = sampler.random(n=n_samples)
         self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
 
     def sobol_thetas(self, n_samples):
-        """
-        Generate Latin Hypercube samples for parameter space.
-
-        This method creates `n_samples` samples using a Latin Hypercube 
-        sampling strategy based on the dimensions of the `parameters` 
-        attribute. The generated samples are stored in `self.thetas`, 
-        and their natural parameter space equivalents are stored in 
-        `self.nat_thetas`.
-
-        Args:
-            n_samples (int): Number of samples to generate.
-
-        Attributes:
-            thetas (ndarray): Generated samples in the unit hypercube.
-            nat_thetas (ndarray): Samples converted to natural parameter 
-                space.
-        """
-        self.n_samples=n_samples
-        dims = len(self.parameters)
-        sampler = Sobol(d=dims, optimization='random-cd')
+        """Generate Sobol samples in the unit cube."""
+        self.n_samples = n_samples
+        sampler = Sobol(d=len(self.parameters), optimization="random-cd")
         self.thetas = sampler.random(n=n_samples)
         self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
-    
-    def get_x(self, x):
-        """
-        Ingests the simulated spectra into the class.
 
-        Parameters
-        ----------
-        x: dict
-            A dictionary with simulated spectra, with one key per observation.
-        """
-        self.x={}
-        for key in x.keys():
-            self.x[key] = x[key].reshape(self.n_samples, 
-                                        len(self.obs[key][:,0]))
+    def get_x(self, x):
+        """Store simulator output using the expected retrieval shapes."""
+        self.x = {
+            key: value.reshape(self.n_samples, len(self.obs[key][:, 0]))
+            for key, value in x.items()
+        }
 
     def create_prior(self):
-        """
-        Constructs a uniform prior distribution based on the min and max
-        values of parameters in self.parameters.
+        """Construct a uniform unit-cube prior."""
+        from sbi import utils as sbi_utils
 
-        Raises:
-            KeyError: If any parameter is missing 'min_value' or 
-            'max_value'.
-        """
-        # prior_mins = []
-        # prior_maxs = []
-        # for keys in self.parameters.keys():
-        #     prior_mins.append(self.parameters[keys]['min_value'])
-        #     prior_maxs.append(self.parameters[keys]['max_value'])
-        
-        # prior_mins = torch.tensor(np.asarray(prior_mins).reshape(1,-1))
-        # prior_maxs = torch.tensor(np.asarray(prior_maxs).reshape(1,-1))
+        self.prior = sbi_utils.BoxUniform(
+            low=torch.zeros(len(self.parameters)),
+            high=torch.ones(len(self.parameters)),
+        )
 
-        self.prior=utils.BoxUniform(low=torch.zeros(len(self.parameters)),
-                                    high=torch.ones(len(self.parameters)))
+    def density_builder(
+        self,
+        flow="nsf",
+        transforms=10,
+        hidden=50,
+        blocks=3,
+        bins=8,
+        dropout=0.05,
+        z_score_theta="independent",
+        z_score_x="independent",
+        use_batch_norm=True,
+    ):
+        """Build the neural posterior estimator used by SNPE-C."""
+        from sbi.inference import SNPE_C
+        from sbi.neural_nets import posterior_nn
 
-    def density_builder(self, flow='nsf', transforms=10, hidden=50, 
-                        blocks=3, bins=8, dropout=0.05, 
-                        z_score_theta='independent', z_score_x='independent',
-                        use_batch_norm=True):
-        """
-        Build the density estimator for the posterior distribution.
-        This function initializes a neural network model for posterior
-        inference using the specified parameters.
-        Parameters
-        ----------
-        flow : str
-            The type of flow model to use (e.g., 'NSF', 'MAF').
-        transforms : int
-            The number of transformations to apply in the flow model.
-        hidden : int
-            The number of hidden units per layer in the neural network.
-        blocks : int
-            The number of residual blocks in the neural network.
-        bins : int
-            The number of bins in the NSF model.
-        dropout : float
-            The dropout probability for the neural network.
-        Returns
-        -------
-        None
-            The density estimator is stored in `self.density`.
-        """
-        self.density = posterior_nn(model=flow, 
-                                    num_transforms=transforms, 
-                                    hidden_features=hidden, 
-                                    num_blocks=blocks, 
-                                    num_bins=bins, 
-                                    dropout_probability=dropout,
-                                    z_score_theta=z_score_theta,
-                                    z_score_x=z_score_x,
-                                    use_batch_norm=use_batch_norm)
-        self.inference = SNPE_C(prior=self.prior, 
-                                density_estimator=self.density)
+        self.density = posterior_nn(
+            model=flow,
+            num_transforms=transforms,
+            hidden_features=hidden,
+            num_blocks=blocks,
+            num_bins=bins,
+            dropout_probability=dropout,
+            z_score_theta=z_score_theta,
+            z_score_x=z_score_x,
+            use_batch_norm=use_batch_norm,
+        )
+        self.inference = SNPE_C(prior=self.prior, density_estimator=self.density)
 
     def train(self, theta, x, proposal, **kwargs):
-        """
-        Train the density estimator using the provided parameter samples
-        and observations.
-        Returns
-        -------
-        None
-            The trained density estimator is stored in `self.density`.
-        """
-
-        self.posterior_estimator = self.inference.append_simulations(theta, x, 
-                                          proposal=proposal).train(show_train_summary=True,
-                              **kwargs)
+        """Append simulations and train the posterior estimator."""
+        self.posterior_estimator = (
+            self.inference.append_simulations(theta, x, proposal=proposal)
+            .train(show_train_summary=True, **kwargs)
+        )
 
     def get_posterior(self):
-        """
-        Build and configure the posterior distribution from the 
-        trained inference object.
-
-        This function constructs the posterior using the trained 
-        inference method and the specified posterior estimator. It 
-        also sets the default observation `self.default_obs` for 
-        future sampling from the posterior.
-
-        Parameters
-        ----------
-        x0 : torch.Tensor
-            The observation to condition the posterior on.
-
-        Attributes
-        ----------
-        self.posterior : sbi.inference.posteriors.Posterior
-            Posterior distribution built from the inference object, 
-            conditioned on `self.default_obs`.
-        """
+        """Build the posterior and cache the preprocessed default observation."""
         self.default_obs_norm = self.do_preprocessing(self.default_obs)
+        self.posterior = self.inference.build_posterior(self.posterior_estimator)
 
-        self.posterior=self.inference.build_posterior(
-            self.posterior_estimator)
-    
-    def generate_training_data(self, proposal, r, n_samples, n_samples_init,
-                           sample_prior_method, n_threads, simulator_kwargs, 
-                           n_aug, reuse_prior=None):
-        
-        if (reuse_prior is not None) and (r == 0):
-            print(f"Reusing prior data from {reuse_prior}")
-            prior_data = pickle.load(open(reuse_prior, 'rb'))
+    def generate_training_data(
+        self,
+        proposal,
+        r,
+        n_samples,
+        n_samples_init,
+        sample_prior_method,
+        n_threads,
+        simulator_kwargs,
+        n_aug,
+        reuse_prior=None,
+        initial_round=None,
+    ):
+        """
+        Generate one round of simulations and return training tensors.
 
-            #Are there enough samples to reuse?
-            reused_n = min(len(prior_data['par']), n_samples)
-            remaining_n = n_samples - reused_n
+        ``initial_round`` exists so resumed runs do not accidentally sample
+        from the prior just because the local loop counter starts at zero.
+        If omitted, the historic ``r == 0`` behavior is preserved.
+        """
+        use_initial_sampling = (r == 0) if initial_round is None else initial_round
 
-            reused_thetas = prior_data['par'][:reused_n]
-            reused_x = {key: value[:reused_n] for key, value in prior_data['spec'].items()}
-
-            if remaining_n > 0:
-                print(f"Generating {remaining_n} additional samples.")
-                self._sample_initial_thetas(sample_prior_method, remaining_n)
-                self.sim_pars = sum(1 for key in self.parameters if not self.parameters[key]['post_processing'])
-
-                # Simulate for additional parameters
-                if n_threads == 1:
-                    new_x = self.simulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
-                else:
-                    new_x = self.psimulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
-
-                # Combine thetas
-                all_thetas = np.concatenate([reused_thetas, self.thetas], axis=0)
-
-                # Combine x dicts
-                all_x = {}
-                for key in reused_x:
-                    all_x[key] = np.concatenate([reused_x[key], new_x[key]], axis=0)
-            
-            else:
-                all_thetas = reused_thetas
-                all_x = reused_x
-
-            self.thetas = all_thetas
-            self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
-            self.n_samples = all_thetas.shape[0]
-            self.get_x(all_x)
-
+        if reuse_prior is not None and use_initial_sampling:
+            self._load_or_extend_reused_prior(
+                reuse_prior=reuse_prior,
+                n_samples=n_samples,
+                sample_prior_method=sample_prior_method,
+                n_threads=n_threads,
+                simulator_kwargs=simulator_kwargs,
+            )
         else:
-            print('Generating training examples.')
-            # Sample parameters
-            if r == 0:
-                self._sample_initial_thetas(sample_prior_method, n_samples_init)
-            else:
-                self.get_thetas(proposal, n_samples)
+            print("Generating training examples.")
+            self._sample_round_thetas(
+                proposal=proposal,
+                n_samples=n_samples,
+                n_samples_init=n_samples_init,
+                sample_prior_method=sample_prior_method,
+                initial_round=use_initial_sampling,
+            )
+            self._run_simulator(n_threads=n_threads, simulator_kwargs=simulator_kwargs)
 
-            # Determine how many parameters to simulate
-            self.sim_pars = sum(1 for key in self.parameters if not self.parameters[key]['post_processing'])
-
-            # Simulate
-            if n_threads == 1:
-                xs = self.simulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
-            else:
-                xs = self.psimulator(self.obs, self.nat_thetas[:, :self.sim_pars], **simulator_kwargs)
-
-            self.get_x(xs)
-
-        # Postprocessing
         self.do_postprocessing()
         self.augment(n_aug)
         self.add_noise()
+        self._clip_emission_arrays(self.noisy_x)
 
-        if self.obs_type == 'emis':
-            for key in self.noisy_x.keys():
-                self.noisy_x[key][self.noisy_x[key] <= 0] = 1e-12
-
-        # Convert to tensors
         theta_tensor = torch.tensor(self.augmented_thetas, dtype=torch.float32)
-        x_tensor = torch.tensor(np.concatenate(list(self.noisy_x.values()), axis=1), dtype=torch.float32)
+        x_tensor = torch.tensor(
+            np.concatenate(list(self.noisy_x.values()), axis=1),
+            dtype=torch.float32,
+        )
         return theta_tensor, x_tensor
 
-    def run(self, n_threads=1, n_samples=100, n_samples_init=None, n_agg=1,
-                        resume=False, n_rounds=10, n_aug=1, flow_kwargs=dict(), 
-                        training_kwargs=dict(), simulator_kwargs=dict(), output_dir='output_FlopPITy',
-                        save_data=False, sample_prior_method='sobol',
-                        reuse_prior=None, IS=True
-                        ):
+    def run(
+        self,
+        n_threads=1,
+        n_samples=100,
+        n_samples_init=None,
+        n_agg=1,
+        resume=False,
+        n_rounds=10,
+        n_aug=1,
+        flow_kwargs=None,
+        training_kwargs=None,
+        simulator_kwargs=None,
+        output_dir="output_FlopPITy",
+        save_data=False,
+        sample_prior_method="sobol",
+        reuse_prior=None,
+    ):
         """
-        Executes the retrieval process over multiple rounds, 
-        involving prior creation, density estimation, simulation, 
-        post-processing, noise addition, and training.
+        Run SNPE-C retrieval rounds.
 
-        Args:
-            n_rounds: int
-                Number of rounds to train iteratively.
-            **flow_kwargs: Additional keyword arguments for the 
-            density builder.
-            **training_kwargs: Additional keyword arguments for the 
-            training process.
-
-        Workflow:
-            1. Initializes the proposals list and creates the prior 
-               distribution.
-            2. Builds the density estimator using the provided flow 
-               arguments.
-            3. Iteratively performs the following for each round:
-               - Samples parameters (thetas) from the current proposal 
-             distribution.
-               - Masks parameters based on the 'post_process' flag in 
-             self.parameters.
-               - Simulates data (xs) using the masked parameters and 
-             observed data (R.obs).
-               - Processes the simulated data and adds noise.
-               - Trains the model using the masked parameters and noisy 
-             data.
-               - Updates the posterior distribution and sets it as the 
-             new proposal.
-               - Appends the current proposal to the proposals list.
-
-        Notes:
-            - The method relies on several other methods within the 
-              class, such as `create_prior`, `density_builder`, 
-              `get_thetas`, `get_x`, `do_postprocessing`, `add_noise`, 
-              `train`, and `get_posterior`.
-
-        Raises:
-            Any exceptions raised by the simulator, training, or other 
-            internal methods will propagate up to the caller.
+        Resumed runs continue from the last stored proposal and sample from
+        that proposal immediately. Completed checkpoints are written after
+        each successful round to ``retrieval.pkl``; pre-round checkpoints are
+        also kept as ``retrieval_pre_round_<N>.pkl`` for crash recovery.
         """
-        self.n_threads=n_threads
+        _ = n_agg
+        flow_kwargs = {} if flow_kwargs is None else flow_kwargs
+        training_kwargs = {} if training_kwargs is None else training_kwargs
+        simulator_kwargs = {} if simulator_kwargs is None else simulator_kwargs
+        n_samples_init = n_samples if n_samples_init is None else n_samples_init
 
-        if n_samples_init==None:
-            n_samples_init=n_samples
+        self.n_threads = n_threads
+        os.makedirs(output_dir, exist_ok=True)
 
-        if resume:
-            print('Resuming training...')
-            proposal=self.proposals[-1]
-        else: 
-            print('Starting training...')
-            self.IS_sampling_efficiency=[]
-            self.logZ=[]
-            self.dlogZ=[]
-            self.create_prior()
-            self.proposals=[self.prior]
-            self.density_builder(**flow_kwargs)
-            proposal=self.prior
+        proposal = self._prepare_run(resume=resume, flow_kwargs=flow_kwargs)
+        start_round = self.completed_rounds
 
-        for r in range(n_rounds):
-            print(f"Round {r+1}")
+        for local_round in range(n_rounds):
+            round_index = start_round + local_round
+            initial_round = not resume and round_index == 0
+            print(f"Round {round_index + 1}")
 
             theta_tensor, x_tensor = self.generate_training_data(
-                proposal=proposal, 
-                r=r,
-                n_samples=n_samples, 
-                n_samples_init=n_samples_init, 
+                proposal=proposal,
+                r=round_index,
+                n_samples=n_samples,
+                n_samples_init=n_samples_init,
                 sample_prior_method=sample_prior_method,
-                n_threads=n_threads, 
-                simulator_kwargs=simulator_kwargs, 
+                n_threads=n_threads,
+                simulator_kwargs=simulator_kwargs,
                 n_aug=n_aug,
-                reuse_prior=reuse_prior if r == 0 else None
+                reuse_prior=reuse_prior if initial_round else None,
+                initial_round=initial_round,
             )
 
-            # Save
-            os.makedirs(output_dir, exist_ok=True)
-            self.save(f'{output_dir}/retrieval.pkl')
-            if save_data==True:
-                pickle.dump(dict(par=self.thetas, spec=self.x), open(f'{output_dir}/data_{r}.pkl', 'wb'))
-
-            # Do IS stuff
-            if IS:
-                n_eff, sampling_efficiency, logZ, dlogZ= self.run_IS()
-                self.IS_sampling_efficiency.append(sampling_efficiency)
-                self.logZ.append(logZ)
-                self.dlogZ.append(dlogZ)
-                print(f'ε = {sampling_efficiency:.3g}')
-                print(f'log(Z) = {logZ:.3g} +- {dlogZ:.3g}')
+            self._checkpoint(output_dir, f"retrieval_pre_round_{round_index + 1}.pkl")
+            self._save_round_data(output_dir, save_data, round_index)
 
             x_norm_tensor = self.do_preprocessing(x_tensor)
-                
             self.train(theta_tensor, x_norm_tensor, proposal, **training_kwargs)
-            
             self.get_posterior()
+
             proposal = self.posterior.set_default_x(self.default_obs_norm)
             self.proposals.append(self.posterior)
-            self.loss_val=self.inference._summary['best_validation_loss']
-    
-    # def run_ensemble(self, N, **run_kwargs):
-    #     ensemble={}
-    #     for i in range(N):
-    #         self.run(**run_kwargs)
-    #         ensemble[i]
-    #     return
+            self.completed_rounds = round_index + 1
+            self.loss_val = self.inference._summary["best_validation_loss"]
+            self._checkpoint(output_dir, "retrieval.pkl")
+
+    def _prepare_run(self, resume, flow_kwargs):
+        if resume:
+            print("Resuming training...")
+            self._validate_resume_state()
+            self.completed_rounds = max(
+                getattr(self, "completed_rounds", 0),
+                len(self.proposals) - 1,
+            )
+            return self.proposals[-1]
+
+        print("Starting training...")
+        self.completed_rounds = 0
+        self.create_prior()
+        self.proposals = [self.prior]
+        self.density_builder(**flow_kwargs)
+        return self.prior
+
+    def _validate_resume_state(self):
+        required = ["proposals", "prior", "inference", "posterior_estimator"]
+        missing = [name for name in required if not hasattr(self, name)]
+        if missing:
+            raise RuntimeError(
+                "Cannot resume retrieval; missing saved state: "
+                + ", ".join(missing)
+            )
+        if len(self.proposals) == 0:
+            raise RuntimeError("Cannot resume retrieval without at least one proposal.")
+
+    def _checkpoint(self, output_dir, filename):
+        self.save(os.path.join(output_dir, filename))
+
+    def _save_round_data(self, output_dir, save_data, round_index):
+        if save_data:
+            path = os.path.join(output_dir, f"data_{round_index}.pkl")
+            with open(path, "wb") as file:
+                pickle.dump({"par": self.thetas, "spec": self.x}, file)
+
+    def _sample_round_thetas(
+        self,
+        proposal,
+        n_samples,
+        n_samples_init,
+        sample_prior_method,
+        initial_round,
+    ):
+        if initial_round:
+            self._sample_initial_thetas(sample_prior_method, n_samples_init)
+        else:
+            self.get_thetas(proposal, n_samples)
+
+    def _load_or_extend_reused_prior(
+        self,
+        reuse_prior,
+        n_samples,
+        sample_prior_method,
+        n_threads,
+        simulator_kwargs,
+    ):
+        print(f"Reusing prior data from {reuse_prior}")
+        with open(reuse_prior, "rb") as file:
+            prior_data = pickle.load(file)
+
+        reused_n = min(len(prior_data["par"]), n_samples)
+        remaining_n = n_samples - reused_n
+        reused_thetas = prior_data["par"][:reused_n]
+        reused_x = {
+            key: value[:reused_n]
+            for key, value in prior_data["spec"].items()
+        }
+
+        if remaining_n > 0:
+            print(f"Generating {remaining_n} additional samples.")
+            self._sample_initial_thetas(sample_prior_method, remaining_n)
+            new_x = self._simulate_current_thetas(
+                n_threads=n_threads,
+                simulator_kwargs=simulator_kwargs,
+            )
+            all_thetas = np.concatenate([reused_thetas, self.thetas], axis=0)
+            all_x = {
+                key: np.concatenate([reused_x[key], new_x[key]], axis=0)
+                for key in reused_x
+            }
+        else:
+            all_thetas = reused_thetas
+            all_x = reused_x
+
+        self.thetas = all_thetas
+        self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+        self.n_samples = all_thetas.shape[0]
+        self.get_x(all_x)
 
     def _sample_initial_thetas(self, method, n_samples):
-        if method == 'random':
+        if method == "random":
             self.get_thetas(self.prior, n_samples)
-        elif method == 'lhs':
+        elif method == "lhs":
             self.lhs_thetas(n_samples)
-        elif method == 'sobol':
-            if (n_samples & (n_samples - 1)) != 0 or n_samples <= 0:
-                n_samples_new = 2 ** int(np.round(np.log2(n_samples)))
-                print(f'n_samples must be a power of 2 for Sobol sampling. I will sample the prior with {n_samples_new} samples and then go back to {n_samples} for the following rounds.')
-                n_samples = n_samples_new
-            self.sobol_thetas(n_samples)
+        elif method == "sobol":
+            sobol_n = self._nearest_power_of_two(n_samples)
+            if sobol_n != n_samples:
+                print(
+                    "n_samples must be a power of 2 for Sobol sampling. "
+                    f"I will sample the prior with {sobol_n} samples and then "
+                    f"go back to {n_samples} for the following rounds."
+                )
+            self.sobol_thetas(sobol_n)
+        else:
+            raise ValueError(
+                "sample_prior_method must be one of 'random', 'lhs', or 'sobol'."
+            )
 
-    def run_IS(self):
-        log_likelihoods= torch.tensor(helpers.likelihood(self.post_x, self.obs))
-        log_priors = self.prior.log_prob(torch.tensor(self.thetas))
-        log_proposal=self.proposals[-1].log_prob(torch.tensor(self.thetas))
+    @staticmethod
+    def _nearest_power_of_two(n_samples):
+        if n_samples <= 0:
+            raise ValueError("n_samples must be positive.")
+        return 2 ** int(np.round(np.log2(n_samples)))
 
-        self.raw_IS_weights, self.IS_weights=helpers.importance_weights(log_likelihoods, log_priors, log_proposal)
+    def _run_simulator(self, n_threads, simulator_kwargs):
+        xs = self._simulate_current_thetas(
+            n_threads=n_threads,
+            simulator_kwargs=simulator_kwargs,
+        )
+        self.get_x(xs)
 
-        n_eff, sampling_efficiency = helpers.eff(self.IS_weights)
+    def _simulate_current_thetas(self, n_threads, simulator_kwargs):
+        self.sim_pars = self._n_simulator_parameters()
+        sim_thetas = self.nat_thetas[:, : self.sim_pars]
+        if n_threads == 1:
+            return self.simulator(self.obs, sim_thetas, **simulator_kwargs)
+        return self.psimulator(self.obs, sim_thetas, **simulator_kwargs)
 
-        logZ, dlogZ = helpers.IS_evidence(self.raw_IS_weights)
+    def _n_simulator_parameters(self):
+        return sum(
+            1
+            for metadata in self.parameters.values()
+            if not metadata["post_processing"]
+        )
 
-        return n_eff, sampling_efficiency, logZ, dlogZ
-    
+    @staticmethod
+    def _concat_obs_values(obs):
+        return np.concatenate(list(obs.values()), axis=0)[:, 1]
+
+    def _clip_emission_arrays(self, arrays):
+        if self.obs_type == "emis":
+            for value in arrays.values():
+                value[value <= 0] = 1e-12
+
     def add_noise(self):
-        """
-        Add Gaussian noise to the spectra based on the observational errors.
-
-        For each observation in `self.obs`, this function adds 
-        random Gaussian noise to the corresponding spectrum in `self.x`.
-        The standard deviation of the noise for each point is taken from 
-        the third column (index 2) of the observation's data array.
-
-        The resulting noisy predictions are stored in `self.noisy_x`.
-
-        Parameters
-        ----------
-        self.x : dict
-            Dictionary of simulated spectra, with one array per observation.
-        self.obs : dict
-            Dictionary of observational data arrays, where each array's third column
-            (index 2) provides the standard deviation (uncertainty) for noise generation.
-
-        Attributes
-        ----------
-        self.noisy_x : dict
-            Dictionary of noisy model predictions created by adding Gaussian noise
-            to `self.x` according to the uncertainties in `self.obs`.
-
-        """
-        self.noisy_x={}
-        for key in self.obs.keys():
-            self.noisy_x[key] = (self.augmented_x[key]+self.error_inflation*self.obs[key][:,2]
-                                 *np.random.standard_normal(len(
-                                     self.obs[key][:,1])))
+        """Add Gaussian noise to the augmented spectra."""
+        self.noisy_x = {}
+        for key in self.obs:
+            noise = (
+                self.error_inflation
+                * self.obs[key][:, 2]
+                * np.random.standard_normal(len(self.obs[key][:, 1]))
+            )
+            self.noisy_x[key] = self.augmented_x[key] + noise
 
     def do_preprocessing(self, x):
-        """
-        Applies a sequence of preprocessing functions to the input data.
+        """Apply configured preprocessing functions to an array or tensor."""
+        if self.preprocessing is None:
+            return x
 
-        Args:
-            x (torch.Tensor or numpy.ndarray): The input data to be preprocessed.
-
-        Returns:
-            torch.Tensor or numpy.ndarray: The preprocessed data after applying the 
-            sequence of preprocessing functions. The output type matches the input type.
-
-        Notes:
-            - The `self.preprocessing` attribute should be a list of preprocessing 
-              function names (as strings) that are defined in the `preprocessing` module.
-            - If `self.preprocessing` is None, the input data `x` is returned unchanged.
-            - If the input `x` is a `torch.Tensor`, it is converted to a NumPy array 
-              before applying each preprocessing function, and then converted back to 
-              a `torch.Tensor` after each function is applied.
-        """
-
-        if self.preprocessing is not None:
-            xnorm = x
-            for i in range(len(self.preprocessing)):
-                preprocessing_fun = getattr(preprocessing, self.preprocessing[i])
-                if isinstance(xnorm, torch.Tensor):
-                    xnorm = preprocessing_fun(xnorm.cpu().numpy())
-                    xnorm = torch.tensor(xnorm, dtype=torch.float32)
-                else:
-                    xnorm = preprocessing_fun(xnorm)
-        else:
-            xnorm = x
+        xnorm = x
+        for function_name in self.preprocessing:
+            preprocessing_fun = getattr(preprocessing, function_name)
+            if isinstance(xnorm, torch.Tensor):
+                xnorm = preprocessing_fun(xnorm.cpu().numpy())
+                xnorm = torch.tensor(xnorm, dtype=torch.float32)
+            else:
+                xnorm = preprocessing_fun(xnorm)
         return xnorm
 
     def do_postprocessing(self):
-        """
-        Perform post-processing on the data stored in `self.x` using the 
-        specified post-processing functions defined in `self.parameters`.
+        """Apply configured post-processing parameters to simulated spectra."""
+        self.post_x = {key: value.copy() for key, value in self.x.items()}
 
-        For each key in `self.parameters`, if the `post_process` attribute 
-        is set, the corresponding post-processing function is dynamically 
-        retrieved from `helpers.postprocessing` and applied to the 
-        observations in `self.x`. The results are stored in `self.post_x`.
+        for par_idx, key in enumerate(self.parameters):
+            if not self.parameters[key]["post_processing"]:
+                continue
 
-        Raises:
-            AttributeError: If the specified post-processing function does 
-            not exist in `helpers.postprocessing`.
-
-            KeyError: If a required key is missing in `self.parameters` or 
-            `self.x`.
-
-        Note:
-            - `self.parameters` is expected to be a dictionary where each 
-              key maps to a dictionary containing a `post_process` key that 
-              specifies the name of the post-processing function.
-            - `self.x` is expected to be a dictionary of observations to be 
-              processed.
-            - `self.post_x` is a dictionary where the processed results 
-              will be stored.
-        """
-        self.post_x={}
-        par_idx=0
-        for key in self.parameters.keys():
-            if self.parameters[key]['post_processing']:
-                if 'offset' in key:
-                    postprocessing_function = postprocessing.offset
-                    obs_key=int(key[6:])
-                    self.post_x[0] = self.x[0]
-                    self.post_x[obs_key] = postprocessing_function(self.nat_thetas[:, par_idx], 
-                                            self.obs[obs_key][:,0], self.x[obs_key])
-                elif 'scaling' in key:
-                    postprocessing_function = postprocessing.scaling
-                    obs_key=int(key[7:])
-                    self.post_x[0] = self.x[0]
-                    self.post_x[obs_key] = postprocessing_function(self.nat_thetas[:, par_idx], 
-                                            self.obs[obs_key][:,0], self.x[obs_key])                                
-                else:
-                    postprocessing_function = getattr(postprocessing,
-                                                    key)
-                    for obs_key in self.x.keys():
-                        self.post_x[obs_key] = postprocessing_function(self.nat_thetas[:, par_idx], 
-                                                self.obs[obs_key][:,0], self.x[obs_key])
+            par_values = self.nat_thetas[:, par_idx]
+            if key.startswith("offset"):
+                obs_key = int(key[6:])
+                self.post_x[obs_key] = postprocessing.offset(
+                    par_values,
+                    self.obs[obs_key][:, 0],
+                    self.post_x[obs_key],
+                )
+            elif key.startswith("scaling"):
+                obs_key = int(key[7:])
+                self.post_x[obs_key] = postprocessing.scaling(
+                    par_values,
+                    self.obs[obs_key][:, 0],
+                    self.post_x[obs_key],
+                )
             else:
-                for obs_key in self.x.keys():
-                    self.post_x[obs_key] = self.x[obs_key]
-            par_idx+=1 
+                postprocessing_function = getattr(postprocessing, key)
+                for obs_key in self.post_x:
+                    self.post_x[obs_key] = postprocessing_function(
+                        par_values,
+                        self.obs[obs_key][:, 0],
+                        self.post_x[obs_key],
+                    )
 
     def psimulator(self, obs, parameters, **kwargs):
-        """
-        Run the simulator in parallel using n_threads, splitting the parameter
-        grid.
-
-        Parameters
-        ----------
-        obs : dict
-            Observation dictionary.
-        parameters : np.ndarray
-            Full parameter grid (n_samples, n_params).
-        n_threads : int
-            Number of parallel process.
-        **kwargs : dict
-            Passed to each self.simulator() call.
-
-        Returns
-        -------
-        combined_spectra : dict
-            Dictionary matching obs keys with arrays of shape 
-            (n_, n_points), combined across threads.
-        """
-
+        """Run the simulator in parallel and combine chunked spectra."""
         n_total = len(parameters)
         if n_total < self.n_threads:
             self.n_threads = n_total
 
-        chunk_size = n_total // self.n_threads
-        remainder = n_total % self.n_threads
+        chunks = self._parameter_chunks(parameters, self.n_threads)
+        args = [
+            (self.simulator, self.obs, chunk, i, kwargs)
+            for i, chunk in enumerate(chunks)
+        ]
 
-        chunk_sizes = [chunk_size + 1 if i < remainder else chunk_size for i in range(self.n_threads)]
+        with mp.get_context("spawn").Pool(processes=self.n_threads) as pool:
+            spectra_parts = pool.map(_run_single_chunk, args)
 
+        combined_spectra = {key: [] for key in obs}
+        for partial in spectra_parts:
+            for key, value in partial.items():
+                combined_spectra[key].append(value)
+
+        return {
+            key: np.vstack(value)
+            for key, value in combined_spectra.items()
+        }
+
+    @staticmethod
+    def _parameter_chunks(parameters, n_threads):
+        n_total = len(parameters)
+        chunk_size = n_total // n_threads
+        remainder = n_total % n_threads
+        chunk_sizes = [
+            chunk_size + 1 if i < remainder else chunk_size
+            for i in range(n_threads)
+        ]
 
         chunks = []
         start = 0
@@ -706,104 +542,35 @@ class Retrieval():
             end = start + size
             chunks.append(parameters[start:end])
             start = end
+        return chunks
 
-        args = [
-            (self.simulator, self.obs, chunk, i, kwargs)
-            for i, chunk in enumerate(chunks)
-        ]
+    def plot_corner(self, proposal_id=-1, n_samples=1000, **CORNER_KWARGS):
+        """Draw a corner plot from one stored proposal."""
+        import matplotlib.pyplot as plt
+        from corner import corner
 
-        mp_context = "spawn"
-
-        with mp.get_context(mp_context).Pool(processes=self.n_threads) as pool:
-            spectra_parts = pool.map(_run_single_chunk, args)
-
-        # Combine results across threads
-        combined_spectra = {k: [] for k in obs}
-        for partial in spectra_parts:
-            for k in partial:
-                combined_spectra[k].append(partial[k])
-
-        # Concatenate chunks into final arrays
-        for k in combined_spectra:
-            combined_spectra[k] = np.vstack(combined_spectra[k])  # shape: (n_total, n_points)
-
-        return combined_spectra
-
-    def plot_corner(self, proposal_id=-1, n_samples=1000, IS_weights=False, **CORNER_KWARGS):
-        """
-        Generates a corner plot for the posterior samples of a proposal distribution.
-
-        Parameters
-        ----------
-        proposal : object
-            The proposal distribution object. It should have a `sample` method 
-            that generates samples from the posterior.
-        n_samples : int
-            The number of samples to draw from the proposal distribution.
-        **CORNER_KWARGS : dict, optional
-            Additional keyword arguments to pass to the `corner.corner` function 
-            for customizing the plot.
-
-        Returns
-        -------
-        fig : matplotlib.figure.Figure
-            The matplotlib figure object containing the corner plot.
-
-        Notes
-        -----
-        - This function requires the `corner` library for generating the corner plot.
-        - The proposal distribution should return samples in a 2D array of shape 
-        (n_samples, n_parameters).
-        """
-
-        # Draw samples from the proposal distribution
         samples = self.proposals[proposal_id].sample((n_samples,)).detach().numpy()
-
-        # Generate the corner plot
-        fig = corner(helpers.convert_cube(samples, self.parameters), 
-                        labels=list(self.parameters.keys()), 
-                        weights=self.IS_weights if IS_weights else np.ones(n_samples),
-                        **CORNER_KWARGS)
-
-        # Show the plot
+        fig = corner(
+            helpers.convert_cube(samples, self.parameters),
+            labels=list(self.parameters.keys()),
+            **CORNER_KWARGS,
+        )
         plt.show()
-
         return fig
 
     def augment(self, n_augment=1):
-        """
-        Augments the spectra in self.post_x by creating multiple copies 
-        with added Gaussian noise.
+        """Repeat current spectra and theta samples for noise augmentation."""
+        self.augmented_x = {
+            key: np.vstack([spectrum.copy() for _ in range(n_augment)])
+            for key, spectrum in self.post_x.items()
+        }
+        self.augmented_thetas = np.vstack(
+            [self.thetas.copy() for _ in range(n_augment)]
+        )
 
-        Parameters
-        ----------
-        n_augment : int, optional
-            Number of augmented copies to create for each spectrum. 
-            Default is 5.
-
-        Returns
-        -------
-        None
-            The augmented spectra are stored in self.augmented_x.
-        """
-        self.augmented_x = {}
-        self.augmented_thetas = []
-        for key, spectrum in self.post_x.items():
-            augmented_spectra = [spectrum.copy() for _ in range(n_augment)]
-            self.augmented_x[key] = np.vstack(augmented_spectra)
-        
-        for _ in range(n_augment):
-            self.augmented_thetas.append(self.thetas.copy())
-        
-        self.augmented_thetas = np.vstack(self.augmented_thetas)
 
 def _run_single_chunk(args):
-    """
-    Standalone helper for multiprocessing — must be top-level (not nested).
-    """
+    """Top-level multiprocessing helper."""
     simulator_func, obs, parameters_chunk, thread_idx, kwargs = args
     time.sleep(thread_idx * 0.05)
     return simulator_func(obs, parameters_chunk, thread_idx, **kwargs)
-
-
-

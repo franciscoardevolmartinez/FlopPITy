@@ -9,7 +9,6 @@ from floppity.helpers import (
     compute_moments,
     find_MAP,
     reduced_chi_squared,
-    W2_distance,
 )
 
 class TestHelpers(unittest.TestCase):
@@ -37,6 +36,7 @@ class TestHelpers(unittest.TestCase):
         np.testing.assert_array_almost_equal(natural, expected)
 
     def test_compute_moments(self):
+        torch.manual_seed(0)
         distribution = Normal(0, 1)
         moments = compute_moments(distribution)
         self.assertAlmostEqual(moments["mean"], 0, places=1)
@@ -63,16 +63,6 @@ class TestHelpers(unittest.TestCase):
         chi2_dict = reduced_chi_squared(obs_dict, sim_dict, n_params=1)
         self.assertIn("obs1", chi2_dict)
         self.assertEqual(chi2_dict["obs1"].shape, (2,))
-
-    def test_W2_distance(self):
-        class MockProposal:
-            def sample(self, shape):
-                return torch.randn(*shape)
-
-        proposals = [MockProposal(), MockProposal()]
-        w2, w2_err = W2_distance(proposals, n_mc=10, n_draws=100)
-        self.assertGreaterEqual(w2, 0)
-        self.assertGreaterEqual(w2_err, 0)
 
 if __name__ == "__main__":
     unittest.main()

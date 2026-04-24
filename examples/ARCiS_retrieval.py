@@ -29,14 +29,13 @@ if __name__ == "__main__":
         dropout=0.5
     )
 
-    R = Retrieval(ARCiS)
+    R = Retrieval(ARCiS, obs_type='emis')
 
     R.parameters=pars
     R.get_obs(obs_list)
 
-    R.run_retrieval(flow_kwargs=flow_kwargs, resume=False, n_threads=2, 
-                    training_kwargs=training_kwargs, simulator_kwargs=ARCiS_kwargs, 
-                    n_rounds=2, n_samples_init=10, n_samples=10
-                    )
+    R.run(flow_kwargs=flow_kwargs, resume=False, n_threads=2,
+          training_kwargs=training_kwargs, simulator_kwargs=ARCiS_kwargs,
+          n_rounds=2, n_samples_init=10, n_samples=10)
     
     R.save(ARCiS_kwargs['output_dir']+'retrieval.pkl')

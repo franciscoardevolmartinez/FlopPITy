@@ -1,7 +1,5 @@
 import numpy as np
-# from geomloss import SamplesLoss
 import torch
-from scipy.special import logsumexp
 
 
 def create_obs_file(wvl, spectrum, error, *args):
@@ -86,7 +84,7 @@ def compute_moments(distribution):
     """
     samples = distribution.sample((10000,))
 
-    mean = np.mean(samples)
+    mean = torch.mean(samples)
     variance = distribution.variance
 
     # Skewness and kurtosis require sampling
@@ -196,70 +194,6 @@ def reduced_chi_squared(obs_dict, sim_dict, n_params=0):
 
     return chi2_dict
 
-# def W2_distance(proposals, n_mc=100, n_draws=1000):
-    # """
-    # Computes the Wasserstein-2 (W2) distance between the last two 
-    # posteriors to gauge convergence.
-
-    # Parameters:
-    # -----------
-    # proposals : list
-    #     A list of proposal distributions. The last two elements of 
-    #     the list (`proposals[-2]` and `proposals[-1]`) are used to 
-    #     compute the W2 distance.
-    
-    # n_mc : int, optional, default=100
-    #     The number of Monte Carlo estimations of the W2 distance. 
-    #     This controls how many times the W2 distance is computed 
-    #     with different random draws to estimate its mean and error.
-
-    # n_draws : int, optional, default=1000
-    #     The number of samples to draw from each proposal distribution 
-    #     in each Monte Carlo estimation.
-
-    # Returns:
-    # --------
-    # self.w2 : float
-    #     The mean Wasserstein-2 distance computed across all Monte 
-    #     Carlo simulations.
-
-    # self.w2_err : float
-    #     The standard error of the W2 distance, computed from the 
-    #     Monte Carlo simulations.
-
-    # Example:
-    # --------
-    # proposals = [proposal_1, proposal_2]  # Example proposals
-    # w2_dist = some_object.W2_distance(proposals, n_mc=100, n_draws=1000)
-    
-    # print(f"W2 distance: {w2_dist.w2}")
-    # print(f"Standard Error: {w2_dist.w2_err}")
-    
-    # Notes:
-    # ------
-    # - This function uses the `SamplesLoss` class from `geomloss` to compute the 
-    # Sinkhorn approximation of the Wasserstein-2 distance.
-    # - The parameter `blur` in `SamplesLoss` controls the level of regularization 
-    # applied to the Wasserstein distance computation (default is 0.05).
-    # - The function assumes that `proposals` contains at least two proposal distributions, 
-    # and it uses the last two for the comparison (`proposals[-2]` and `proposals[-1]`).
-    # """
-    # loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05)
-
-    # old_thetas = proposals[-2].sample((n_draws,)).reshape((
-    #     n_draws,-1))
-    # new_thetas = proposals[-1].sample((n_draws,)).reshape((
-    #     n_draws,-1))
-
-    # emd_inter=[]
-    # for i in range(n_mc):
-    #     emd_inter.append(loss_fn(old_thetas, new_thetas)*n_draws)
-
-    # w2=np.mean(emd_inter)
-    # w2_err=np.std(emd_inter)
-
-    # return w2, w2_err
-
 def find_best_fit(obs_dict, sim_dict):
     """
     Find the simulation with the lowest reduced chi-squared value 
@@ -294,68 +228,3 @@ def find_best_fit(obs_dict, sim_dict):
         best_fit_dict[key] = (best_fit_index, best_fit_chi2)
 
     return best_fit_dict
-
-def likelihood(x_dict, obs_dict):
-    """Calculate the log likelihood of model spectra compared to observations.
-
-    Args:
-        x_dict (dict): Dictionary of simulated spectra (keys are instruments, values are arrays).
-        obs_dict (dict): Dictionary of observed spectra (keys are instruments, values are arrays).
-
-    Returns:
-        np.ndarray: Log likelihood values for each simulated spectrum across all instruments.
-    """
-    log_likelihoods = []
-
-    for key in obs_dict:
-        obs = obs_dict[key]
-        x = x_dict[key]
-
-        if obs.shape[1] < 3:
-            raise ValueError(f"Observation {key} must have at least 3 columns (wavelength, spectrum, error)")
-
-        if x.shape[1] != len(obs[:, 1]):
-            raise ValueError(f"Shape mismatch for {key}: x shape {x.shape}, obs length {len(obs[:, 1])}")
-
-        residual = obs[:, 1] - x
-        log_likelihood = -0.5 * np.sum((residual**2 / obs[:, 2]**2) + np.log(2 * np.pi * obs[:, 2]**2), axis=1)
-        log_likelihoods.append(log_likelihood)
-
-    # Concatenate log likelihoods from all instruments
-    return np.concatenate(log_likelihoods)
-
-def importance_weights(log_likelihoods, log_priors, log_proposal):
-    """Calculate importance weights for a proposal distribution.
-
-    (From Gebhard+25)
-
-    Args:
-        x (np.ndarray): Model spectra.
-        o (np.ndarray): Observed spectra.
-        s (np.ndarray): Errors in the observed spectra.
-        P (np.ndarray): Proposal distribution probabilities.
-
-    Returns:
-        np.ndarray: Importance weights normalized to sum to 1.
-    """
-    # log_likelihoods = likelihood(x,o,s)
-    log_weights = (log_likelihoods + log_priors - log_proposal).detach().numpy()
-    N = len(log_weights)
-    normalized_weights = np.exp(
-        np.log(N) + log_weights - logsumexp(log_weights)
-    )
-    return log_weights, normalized_weights
-
-def eff(weights):    
-    n_eff = float(np.sum(weights) ** 2 / np.sum(weights**2))
-    sampling_efficiency = n_eff / len(weights)
-    return n_eff, sampling_efficiency
-
-def IS_evidence(weights):
-    n = len(weights)
-    n_eff,_ = eff(weights)
-
-    log_evidence = float(logsumexp(weights) - np.log(n))
-    log_evidence_std = float(np.sqrt((n - n_eff) / (n * n_eff)))
-
-    return log_evidence, log_evidence_std
