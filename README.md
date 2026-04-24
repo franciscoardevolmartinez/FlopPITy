@@ -63,8 +63,28 @@ Load one or more observations with:
 R.get_obs(["path/to/obs_0.txt", "path/to/obs_1.txt"])
 ```
 
-Internally, observations are stored as `R.obs[0]`, `R.obs[1]`, and so on. The
-simulator must return spectra with matching keys.
+By default, observations are stored as `R.obs[0]`, `R.obs[1]`, and so on. You
+can also give them explicit names:
+
+```python
+R.get_obs(
+    ["path/to/prism.txt", "path/to/miri.txt"],
+    obs_names=["prism", "miri"],
+)
+```
+
+Or pass a mapping directly:
+
+```python
+R.get_obs({
+    "prism": "path/to/prism.txt",
+    "miri": "path/to/miri.txt",
+})
+```
+
+The simulator must return spectra with matching keys. Named observations are
+especially useful for observation-specific post-processing parameters like
+offsets and scaling factors.
 
 ### Observation Type
 
@@ -174,11 +194,11 @@ from floppity import Retrieval
 from floppity.simulators import ARCiS, read_ARCiS_input
 
 arcis_input = "path/to/arcis_input.in"
-pars, obs_list = read_ARCiS_input(arcis_input)
+pars, obs_dict = read_ARCiS_input(arcis_input)
 
 R = Retrieval(ARCiS, obs_type="emis")
 R.parameters = pars
-R.get_obs(obs_list)
+R.get_obs(obs_dict)
 ```
 
 Pass ARCiS runtime options through `simulator_kwargs`:
@@ -189,6 +209,7 @@ ARCiS_kwargs = {
     "output_dir": "output_ARCiS",
     "ARCiS_dir": "/usr/local/bin/ARCiS",
     "num_threads": "4",
+    "save_atmosphere": True,
 }
 
 R.run(
@@ -207,9 +228,19 @@ ARCiS wrapper notes:
 - `output_dir` defaults to `"./arcis_outputs"`.
 - `ARCiS_dir` defaults to `"/usr/local/bin/ARCiS"`.
 - `num_threads` sets `OMP_NUM_THREADS` for the ARCiS subprocess.
+- `save_atmosphere` defaults to `True`. When enabled, FlopPITy gathers every
+  model's `mixingratios.dat` into one file per retrieval round.
+- `atmosphere_file` defaults to `"mixingratios.dat"`.
+- `atmosphere_output` can override the output filename. By default the wrapper
+  writes `mixingratios_round_<round>.dat` in the ARCiS output directory.
 - The wrapper forces or adds `makeai=.true.` in a copied input file.
 - Temporary ARCiS model directories are removed after spectra are read.
 - ARCiS logs are written inside the ARCiS output directory.
+
+The combined atmosphere file contains one block per simulated model, prefixed
+by a comment with the retrieval round, global model index, thread index, local
+model index, and parameter vector. This is designed to preserve atmospheric
+structures even though the temporary ARCiS model directories are cleaned up.
 
 See `examples/ARCiS_retrieval.py` for a complete script-style example.
 
@@ -315,6 +346,9 @@ R = Retrieval.load("retrieval.pkl")
 
 `run(...)` also writes checkpoints:
 
+- `retrieval_setup.json`: JSON summary of the run setup, including observation
+  sources and shapes, parameter metadata, preprocessing, simulator name,
+  `flow_kwargs`, `training_kwargs`, and `simulator_kwargs`.
 - `retrieval_pre_round_<N>.pkl`: state after generating data for round `N`, but
   before training that round.
 - `retrieval.pkl`: state after each successfully completed training round.
@@ -370,18 +404,23 @@ Supported function names correspond to functions in `floppity.postprocessing`:
 - `vrot`: rotational broadening.
 - `wvl_offset`: additive wavelength offset.
 - `instrumental_broadening`: Gaussian broadening.
-- `offset<N>`: additive flux offset applied only to observation key `N`.
-- `scaling<N>`: multiplicative flux scaling applied only to observation key `N`.
+- `offset:<obs_key>`: additive flux offset applied only to one observation.
+- `scaling:<obs_key>`: multiplicative flux scaling applied only to one
+  observation.
 
 Examples for observation-specific parameters:
 
 ```python
-R.add_parameter("offset1", -0.01, 0.01, post_process=True)
-R.add_parameter("scaling2", 0.8, 1.2, post_process=True)
+R.add_parameter("offset:prism", -0.01, 0.01, post_process=True)
+R.add_parameter("scaling:miri", 0.8, 1.2, post_process=True)
 ```
 
-In those examples, `offset1` applies to `R.obs[1]` and `scaling2` applies to
-`R.obs[2]`.
+In those examples, `offset:prism` applies to `R.obs["prism"]` and
+`scaling:miri` applies to `R.obs["miri"]`.
+
+The underscore form also works, for example `offset_prism`. For older
+integer-key workflows, names like `offset1` and `scaling2` still refer to
+`R.obs[1]` and `R.obs[2]`.
 
 ## Writing a Simulator
 

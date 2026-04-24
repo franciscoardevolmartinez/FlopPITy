@@ -3,6 +3,7 @@ import os
 import time
 from tqdm import trange, tqdm
 import subprocess
+import fcntl
 
 def mock_simulator(obs, pars, thread=0):
     '''
@@ -73,9 +74,9 @@ def read_ARCiS_input(input_path):
             - 'global': bool, currently always False (for global parameter
               flagging)
 
-    obs_list : list of str
-        A list of file paths to the observational datasets specified in the
-        ARCiS input.
+    obs_dict : dict
+        A dictionary of observation names and file paths specified in the
+        ARCiS input. Keys are named like ``obs1``, ``obs2``, and so on.
     """
     with open(input_path, 'rb') as arcis_input:
         lines = arcis_input.readlines()
@@ -119,16 +120,16 @@ def read_ARCiS_input(input_path):
             i += 1
 
     # Extract observation file paths
-    obs_list = []
+    obs_dict = {}
     obsn = 1
     for line in clean_in:
         key = f'obs{obsn}:file'
         if key in line:
             path = line.split('=')[-1].strip().strip('"')
-            obs_list.append(path)
+            obs_dict[f'obs{obsn}'] = path
             obsn += 1
 
-    return par_dict, obs_list
+    return par_dict, obs_dict
 
 def ARCiS(obs, parameters, thread=0, **kwargs):
     """
@@ -151,6 +152,12 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
             - output_dir (str): Directory where outputs are written.
             - ARCiS_dir (str): The location where ARCiS is installed.
             If it's not passed, it's assumed to be \'/usr/local/bin/ARCiS\'.
+            - save_atmosphere (bool): If True, append each model's
+              mixingratios.dat to one round-level output file.
+            - atmosphere_file (str): Atmospheric structure file to collect
+              from each ARCiS model directory. Defaults to mixingratios.dat.
+            - atmosphere_output (str): Combined atmosphere filename. Defaults
+              to mixingratios_round_<round>.dat.
 
     Returns
     -------
@@ -164,6 +171,14 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     ARCiS = kwargs.get('ARCiS_dir', '/usr/local/bin/ARCiS')
     verbose = kwargs.get('verbose', True)
     num_threads = kwargs.get('num_threads', "4")
+    round_index = kwargs.get('_round_index', 0)
+    sample_offset = kwargs.get('_sample_offset', 0)
+    save_atmosphere = kwargs.get('save_atmosphere', True)
+    atmosphere_file = kwargs.get('atmosphere_file', 'mixingratios.dat')
+    atmosphere_output = kwargs.get(
+        'atmosphere_output',
+        f'mixingratios_round_{round_index}.dat'
+    )
     os.makedirs(output_dir, exist_ok=True)
 
     # Copy and modify input file
@@ -190,8 +205,8 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     output_base = os.path.join(output_dir, f'outputARCiS_{thread}')
 
     n_spectra = parameters.shape[0]
-    obs_indices = sorted(obs.keys())
-    obs_files = [f'obs{idx+1:03d}' for idx in obs_indices]
+    obs_indices = list(obs.keys())
+    obs_files = [_arcis_obs_file_name(key) for key in obs_indices]
 
     # Write parameter grid file
     param_file = os.path.join(output_dir, f'parametergridfile_{thread}.dat')
@@ -234,6 +249,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     print('Reading ARCiS output...')
     for i in trange(n_spectra):
         model_dir = f'{output_base}/model{i+1:06d}/'
+        global_model_index = sample_offset + i
 
         for k, obs_file in zip(obs_indices, obs_files):
             try:
@@ -242,6 +258,18 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
                 print(f'Warning: Could not read {obs_file} in {model_dir}: {e}')
                 phase = -1 * np.ones_like(obs[k][:, 1])  # fallback
             spectra[k].append(phase)
+
+        if save_atmosphere:
+            _append_arcis_atmosphere_structure(
+                model_dir=model_dir,
+                atmosphere_file=atmosphere_file,
+                output_path=os.path.join(output_dir, atmosphere_output),
+                round_index=round_index,
+                thread=thread,
+                local_model_index=i,
+                global_model_index=global_model_index,
+                parameters=parameters[i],
+            )
 
     for k in spectra:
         spectra[k] = np.array(spectra[k])  # shape: (n_spectra, n_points)
@@ -300,3 +328,49 @@ def check_ARCiS_status(proc, output_dir, n_models, thread):
     finally:
         proc.wait()
         progress.close()
+
+def _arcis_obs_file_name(obs_key):
+    """Convert a FlopPITy observation key to an ARCiS output filename."""
+    if isinstance(obs_key, int):
+        return f'obs{obs_key + 1:03d}'
+
+    obs_key = str(obs_key)
+    if obs_key.startswith('obs') and obs_key[3:].isdigit():
+        return f'obs{int(obs_key[3:]):03d}'
+
+    return obs_key
+
+def _append_arcis_atmosphere_structure(
+    model_dir,
+    atmosphere_file,
+    output_path,
+    round_index,
+    thread,
+    local_model_index,
+    global_model_index,
+    parameters,
+):
+    source_path = os.path.join(model_dir, atmosphere_file)
+    if not os.path.exists(source_path):
+        print(f'Warning: Could not find {atmosphere_file} in {model_dir}')
+        return
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(source_path, 'r') as source:
+        contents = source.read().rstrip()
+
+    parameter_text = ' '.join(f'{value:.17g}' for value in np.asarray(parameters))
+    with open(output_path, 'a') as destination:
+        fcntl.flock(destination, fcntl.LOCK_EX)
+        try:
+            destination.write(
+                f'# round={round_index} '
+                f'global_model={global_model_index} '
+                f'thread={thread} '
+                f'local_model={local_model_index} '
+                f'parameters={parameter_text}\n'
+            )
+            destination.write(contents)
+            destination.write('\n\n')
+        finally:
+            fcntl.flock(destination, fcntl.LOCK_UN)
