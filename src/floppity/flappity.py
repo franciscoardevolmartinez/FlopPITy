@@ -20,6 +20,7 @@ TRANSIENT_STATE = {
     "x",
     "nat_thetas",
     "thetas",
+    "theta_sources",
     "augmented_x",
     "augmented_thetas",
 }
@@ -156,6 +157,7 @@ class Retrieval:
         thetas = proposal.sample((self.n_samples,))
         self.thetas = thetas.cpu().detach().numpy().reshape(-1, len(self.parameters))
         self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+        self.theta_sources = self._sample_sources_from_proposal(proposal, self.n_samples)
 
     def lhs_thetas(self, n_samples):
         """Generate Latin hypercube samples in the unit cube."""
@@ -163,6 +165,7 @@ class Retrieval:
         sampler = LatinHypercube(d=len(self.parameters), optimization="random-cd")
         self.thetas = sampler.random(n=n_samples)
         self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+        self.theta_sources = self._sample_sources("prior", self.n_samples)
 
     def sobol_thetas(self, n_samples):
         """Generate Sobol samples in the unit cube."""
@@ -170,6 +173,7 @@ class Retrieval:
         sampler = Sobol(d=len(self.parameters), optimization="random-cd")
         self.thetas = sampler.random(n=n_samples)
         self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+        self.theta_sources = self._sample_sources("prior", self.n_samples)
 
     def get_x(self, x):
         """Store simulator output using the expected retrieval shapes."""
@@ -300,6 +304,7 @@ class Retrieval:
         save_data=False,
         sample_prior_method="sobol",
         reuse_prior=None,
+        alpha=0,
     ):
         """
         Run SNPE-C retrieval rounds.
@@ -314,8 +319,10 @@ class Retrieval:
         training_kwargs = {} if training_kwargs is None else training_kwargs
         simulator_kwargs = {} if simulator_kwargs is None else simulator_kwargs
         n_samples_init = n_samples if n_samples_init is None else n_samples_init
+        self._validate_alpha(alpha)
 
         self.n_threads = n_threads
+        self.alpha = alpha
         self.output = RetrievalOutput(output_dir)
 
         proposal = self._prepare_run(resume=resume, flow_kwargs=flow_kwargs)
@@ -337,6 +344,7 @@ class Retrieval:
                 "save_data": save_data,
                 "sample_prior_method": sample_prior_method,
                 "reuse_prior": reuse_prior,
+                "alpha": alpha,
                 "start_round": start_round,
                 "final_round": start_round + n_rounds,
             },
@@ -370,8 +378,10 @@ class Retrieval:
             self.train(theta_tensor, x_norm_tensor, proposal, **training_kwargs)
             self.get_posterior()
 
-            proposal = self.posterior.set_default_x(self.default_obs_norm)
-            self.proposals.append(self.posterior)
+            posterior = self.posterior.set_default_x(self.default_obs_norm)
+            self.posteriors.append(posterior)
+            proposal = self._next_proposal(posterior, alpha)
+            self.proposals.append(proposal)
             self.completed_rounds = round_index + 1
             self.loss_val = self.inference._summary["best_validation_loss"]
             self._checkpoint(output_dir, "retrieval.pkl")
@@ -457,12 +467,15 @@ class Retrieval:
                 getattr(self, "completed_rounds", 0),
                 len(self.proposals) - 1,
             )
+            if not hasattr(self, "posteriors"):
+                self.posteriors = []
             return self.proposals[-1]
 
         print("Starting training...")
         self.completed_rounds = 0
         self.create_prior()
         self.proposals = [self.prior]
+        self.posteriors = []
         self.density_builder(**flow_kwargs)
         return self.prior
 
@@ -477,6 +490,27 @@ class Retrieval:
         if len(self.proposals) == 0:
             raise RuntimeError("Cannot resume retrieval without at least one proposal.")
 
+    @staticmethod
+    def _validate_alpha(alpha):
+        if alpha < 0 or alpha > 1:
+            raise ValueError("alpha must be between 0 and 1.")
+
+    def _next_proposal(self, posterior, alpha):
+        if alpha == 0:
+            return posterior
+        return _MixtureProposal(self.prior, posterior, alpha)
+
+    def _sample_sources_from_proposal(self, proposal, n_samples):
+        if hasattr(proposal, "last_sample_sources"):
+            return proposal.last_sample_sources.copy()
+        if proposal is getattr(self, "prior", None):
+            return self._sample_sources("prior", n_samples)
+        return self._sample_sources("proposal", n_samples)
+
+    @staticmethod
+    def _sample_sources(source, n_samples):
+        return np.full(n_samples, source, dtype="<U8")
+
     def _checkpoint(self, output_dir, filename):
         self._output_manager(output_dir).write_checkpoint(self, filename=filename)
 
@@ -487,6 +521,8 @@ class Retrieval:
                 thetas=self.thetas,
                 nat_thetas=getattr(self, "nat_thetas", None),
                 spectra=self.x,
+                sample_sources=getattr(self, "theta_sources", None),
+                processed_spectra=getattr(self, "post_x", None),
             )
 
     def _output_manager(self, output_dir):
@@ -524,6 +560,10 @@ class Retrieval:
         reused_n = min(len(prior_data["par"]), n_samples)
         remaining_n = n_samples - reused_n
         reused_thetas = prior_data["par"][:reused_n]
+        reused_sources = prior_data.get(
+            "sample_sources",
+            self._sample_sources("prior", len(prior_data["par"])),
+        )[:reused_n]
         reused_x = {
             key: value[:reused_n]
             for key, value in prior_data["spec"].items()
@@ -538,15 +578,18 @@ class Retrieval:
                 sample_offset=reused_n,
             )
             all_thetas = np.concatenate([reused_thetas, self.thetas], axis=0)
+            all_sources = np.concatenate([reused_sources, self.theta_sources], axis=0)
             all_x = {
                 key: np.concatenate([reused_x[key], new_x[key]], axis=0)
                 for key in reused_x
             }
         else:
             all_thetas = reused_thetas
+            all_sources = reused_sources
             all_x = reused_x
 
         self.thetas = all_thetas
+        self.theta_sources = all_sources
         self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
         self.n_samples = all_thetas.shape[0]
         self.get_x(all_x)
@@ -802,3 +845,66 @@ def _run_single_chunk(args):
     simulator_func, obs, parameters_chunk, thread_idx, kwargs = args
     time.sleep(thread_idx * 0.05)
     return simulator_func(obs, parameters_chunk, thread_idx, **kwargs)
+
+
+def _sample_mixture(prior, posterior, num_samples, alpha):
+    n_prior = int(alpha * num_samples)
+    n_posterior = num_samples - n_prior
+    samples = []
+    sources = []
+
+    if n_prior:
+        theta_prior = _as_2d_samples(prior.sample((n_prior,)))
+        samples.append(theta_prior)
+        sources.extend(["prior"] * n_prior)
+
+    if n_posterior:
+        theta_posterior = _as_2d_samples(posterior.sample((n_posterior,)))
+        samples.append(theta_posterior)
+        sources.extend(["proposal"] * n_posterior)
+
+    return torch.cat(samples, dim=0), np.asarray(sources, dtype="<U8")
+
+
+def _as_2d_samples(samples):
+    if samples.ndim == 3 and samples.shape[1] == 1:
+        return samples.squeeze(1)
+    return samples
+
+
+class _MixtureProposal:
+    """Mixture of the prior and uninflated posterior for posterior inflation."""
+
+    def __init__(self, prior, posterior, alpha):
+        self.prior = prior
+        self.posterior = posterior
+        self.alpha = alpha
+        self.last_sample_sources = None
+
+    def sample(self, shape):
+        samples, sources = _sample_mixture(
+            prior=self.prior,
+            posterior=self.posterior,
+            num_samples=shape[0],
+            alpha=self.alpha,
+        )
+        self.last_sample_sources = sources
+        return samples
+
+    def log_prob(self, theta):
+        terms = []
+        if self.alpha > 0:
+            alpha = torch.as_tensor(self.alpha, dtype=theta.dtype, device=theta.device)
+            terms.append(
+                self.prior.log_prob(theta) + torch.log(alpha)
+            )
+        if self.alpha < 1:
+            posterior_weight = torch.as_tensor(
+                1 - self.alpha,
+                dtype=theta.dtype,
+                device=theta.device,
+            )
+            terms.append(
+                self.posterior.log_prob(theta) + torch.log(posterior_weight)
+            )
+        return torch.logsumexp(torch.stack(terms, dim=0), dim=0)

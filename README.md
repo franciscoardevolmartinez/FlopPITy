@@ -263,6 +263,7 @@ R.run(
     save_data=False,
     sample_prior_method="sobol",
     reuse_prior=None,
+    alpha=0,
 )
 ```
 
@@ -284,6 +285,9 @@ Important options:
 - `reuse_prior`: path to previous saved training data to reuse initial prior
   simulations. New outputs use `rounds/round_<NNN>/training_data.npz`; legacy
   `data_<round>.pkl` files are still readable.
+- `alpha`: posterior inflation fraction. If `alpha > 0`, later rounds sample
+  an `alpha` fraction of parameters from the prior and `1 - alpha` from the
+  latest uninflated posterior proposal.
 - `resume`: continue training from an already trained and loaded retrieval.
 
 ### Sampling Methods
@@ -356,8 +360,9 @@ R = Retrieval.load("retrieval.pkl")
 - `retrieval.pkl`: state after each successfully completed training round.
 - `rounds/round_<NNN>/training_data.npz`: optional per-round training arrays
   written when `save_data=True`. These archives store the sampled unit-cube
-  parameters, natural parameters when available, and simulator spectra while
-  preserving observation keys such as `obs1` or `miri`.
+  parameters, natural parameters when available, raw simulator spectra,
+  post-processed spectra, and per-sample source labels (`prior` or `proposal`)
+  while preserving observation keys such as `obs1` or `miri`.
 
 Pickle is still used for retrieval checkpoints because those contain trained
 Python and `sbi` objects. Array-heavy training data is written as `.npz`, which
@@ -376,6 +381,8 @@ data = RetrievalOutput.load_round_data(
 )
 theta = data["par"]
 spectra = data["spec"]
+retrieved_spectra = data.get("post_spec", spectra)
+sample_sources = data.get("sample_sources")
 ```
 
 Resume from a completed checkpoint with:

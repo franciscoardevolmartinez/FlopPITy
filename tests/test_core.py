@@ -443,6 +443,52 @@ class TestHelpers(unittest.TestCase):
 
         np.testing.assert_allclose(theta_tensor.numpy(), np.full((3, 1), 0.2))
 
+    def test_mixture_proposal_tracks_per_sample_sources(self):
+        from floppity.flappity import _MixtureProposal
+
+        mixture = _MixtureProposal(
+            prior=DummyProposal(0.1),
+            posterior=DummyProposal(0.8),
+            alpha=0.4,
+        )
+
+        samples = mixture.sample((5,))
+
+        np.testing.assert_array_equal(
+            samples.numpy(),
+            np.array([[0.1], [0.1], [0.8], [0.8], [0.8]], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            mixture.last_sample_sources,
+            np.array(["prior", "prior", "proposal", "proposal", "proposal"]),
+        )
+
+    def test_get_thetas_preserves_mixture_sample_sources(self):
+        from floppity.flappity import _MixtureProposal
+
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.parameters = {
+            "level": {
+                "min": 0,
+                "max": 1,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+        }
+        proposal = _MixtureProposal(
+            prior=DummyProposal(0.1),
+            posterior=DummyProposal(0.8),
+            alpha=0.5,
+        )
+
+        retrieval.get_thetas(proposal, 4)
+
+        np.testing.assert_array_equal(
+            retrieval.theta_sources,
+            np.array(["prior", "prior", "proposal", "proposal"]),
+        )
+
     def test_resume_state_validation(self):
         retrieval = Retrieval(flat_simulator, obs_type="trans")
         with self.assertRaises(RuntimeError):
@@ -454,6 +500,23 @@ class TestHelpers(unittest.TestCase):
         retrieval.posterior_estimator = object()
         with self.assertRaises(RuntimeError):
             retrieval._prepare_run(resume=True, flow_kwargs={})
+
+    def test_resume_initializes_missing_posteriors_list(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.proposals = [DummyProposal(0.1)]
+        retrieval.prior = DummyProposal(0.1)
+        retrieval.inference = object()
+        retrieval.posterior_estimator = object()
+
+        retrieval._prepare_run(resume=True, flow_kwargs={})
+
+        self.assertEqual(retrieval.posteriors, [])
+
+    def test_alpha_validation_rejects_out_of_range_values(self):
+        with self.assertRaises(ValueError):
+            Retrieval._validate_alpha(-0.1)
+        with self.assertRaises(ValueError):
+            Retrieval._validate_alpha(1.1)
 
     def test_save_and_load_drop_transient_arrays(self):
         import tempfile
@@ -488,6 +551,11 @@ class TestHelpers(unittest.TestCase):
                     "obs1": np.array([[10.0, 20.0], [30.0, 40.0]]),
                     2: np.array([[50.0], [60.0]]),
                 },
+                processed_spectra={
+                    "obs1": np.array([[11.0, 21.0], [31.0, 41.0]]),
+                    2: np.array([[51.0], [61.0]]),
+                },
+                sample_sources=np.array(["prior", "proposal"]),
             )
             loaded = RetrievalOutput.load_round_data(path)
 
@@ -502,8 +570,16 @@ class TestHelpers(unittest.TestCase):
         )
         self.assertEqual(list(loaded["spec"].keys()), ["obs1", 2])
         np.testing.assert_array_equal(
+            loaded["sample_sources"],
+            np.array(["prior", "proposal"]),
+        )
+        np.testing.assert_array_equal(
             loaded["spec"]["obs1"],
             np.array([[10.0, 20.0], [30.0, 40.0]]),
+        )
+        np.testing.assert_array_equal(
+            loaded["post_spec"]["obs1"],
+            np.array([[11.0, 21.0], [31.0, 41.0]]),
         )
 
     def test_save_round_data_writes_npz_archive(self):

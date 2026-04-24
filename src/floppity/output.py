@@ -40,7 +40,15 @@ class RetrievalOutput:
             pickle.dump(retrieval, file)
         return path
 
-    def write_round_data(self, round_index, thetas, spectra, nat_thetas=None):
+    def write_round_data(
+        self,
+        round_index,
+        thetas,
+        spectra,
+        nat_thetas=None,
+        sample_sources=None,
+        processed_spectra=None,
+    ):
         path = self.round_data_path(round_index)
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -48,6 +56,7 @@ class RetrievalOutput:
             "format": "floppity.training_data",
             "version": 1,
             "spectra": [],
+            "processed_spectra": [],
         }
         arrays = {
             "thetas": np.asarray(thetas),
@@ -55,6 +64,8 @@ class RetrievalOutput:
         }
         if nat_thetas is not None:
             arrays["nat_thetas"] = np.asarray(nat_thetas)
+        if sample_sources is not None:
+            arrays["sample_sources"] = np.asarray(sample_sources, dtype="U")
 
         for i, (key, value) in enumerate(spectra.items()):
             array_name = f"spectrum_{i}"
@@ -65,6 +76,17 @@ class RetrievalOutput:
                 }
             )
             arrays[array_name] = np.asarray(value)
+
+        if processed_spectra is not None:
+            for i, (key, value) in enumerate(processed_spectra.items()):
+                array_name = f"processed_spectrum_{i}"
+                metadata["processed_spectra"].append(
+                    {
+                        "array": array_name,
+                        "key": self._serialize_key(key),
+                    }
+                )
+                arrays[array_name] = np.asarray(value)
 
         arrays["metadata"] = np.array(json.dumps(metadata))
         np.savez_compressed(path, **arrays)
@@ -90,8 +112,16 @@ class RetrievalOutput:
                 "par": archive["thetas"],
                 "spec": spectra,
             }
+            processed_spectra = {}
+            for entry in metadata.get("processed_spectra", []):
+                key = cls._deserialize_key(entry["key"])
+                processed_spectra[key] = archive[entry["array"]]
+            if processed_spectra:
+                result["post_spec"] = processed_spectra
             if "nat_thetas" in archive:
                 result["nat_par"] = archive["nat_thetas"]
+            if "sample_sources" in archive:
+                result["sample_sources"] = archive["sample_sources"]
             return result
 
     @staticmethod
