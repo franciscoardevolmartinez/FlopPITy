@@ -276,12 +276,14 @@ Important options:
 - `flow_kwargs`: arguments forwarded to `density_builder`.
 - `training_kwargs`: arguments forwarded to `sbi` training.
 - `simulator_kwargs`: arguments forwarded to your simulator.
-- `output_dir`: checkpoint and optional data output directory.
-- `save_data`: if `True`, writes per-round `data_<round>.pkl` files.
+- `output_dir`: checkpoint, setup log, and optional data output directory.
+- `save_data`: if `True`, writes per-round compressed NumPy archives at
+  `rounds/round_<NNN>/training_data.npz`.
 - `sample_prior_method`: one of `"sobol"`, `"lhs"`, or `"random"` for the
   initial round.
-- `reuse_prior`: path to a previous `data_<round>.pkl` file to reuse initial
-  prior simulations.
+- `reuse_prior`: path to previous saved training data to reuse initial prior
+  simulations. New outputs use `rounds/round_<NNN>/training_data.npz`; legacy
+  `data_<round>.pkl` files are still readable.
 - `resume`: continue training from an already trained and loaded retrieval.
 
 ### Sampling Methods
@@ -352,6 +354,29 @@ R = Retrieval.load("retrieval.pkl")
 - `retrieval_pre_round_<N>.pkl`: state after generating data for round `N`, but
   before training that round.
 - `retrieval.pkl`: state after each successfully completed training round.
+- `rounds/round_<NNN>/training_data.npz`: optional per-round training arrays
+  written when `save_data=True`. These archives store the sampled unit-cube
+  parameters, natural parameters when available, and simulator spectra while
+  preserving observation keys such as `obs1` or `miri`.
+
+Pickle is still used for retrieval checkpoints because those contain trained
+Python and `sbi` objects. Array-heavy training data is written as `.npz`, which
+is smaller, easier to inspect with NumPy, and less coupled to Python object
+internals.
+
+The output paths and training-data serialization are centralized in
+`floppity.RetrievalOutput`. You usually do not need to instantiate it directly,
+but it is useful for inspecting saved round data:
+
+```python
+from floppity import RetrievalOutput
+
+data = RetrievalOutput.load_round_data(
+    "output_FlopPITy/rounds/round_000/training_data.npz"
+)
+theta = data["par"]
+spectra = data["spec"]
+```
 
 Resume from a completed checkpoint with:
 

@@ -1,4 +1,3 @@
-import json
 import os
 import time
 import multiprocessing as mp
@@ -10,6 +9,7 @@ import torch
 from scipy.stats.qmc import LatinHypercube, Sobol
 
 from floppity import helpers
+from floppity.output import RetrievalOutput
 from floppity import postprocessing
 from floppity import preprocessing
 
@@ -316,7 +316,7 @@ class Retrieval:
         n_samples_init = n_samples if n_samples_init is None else n_samples_init
 
         self.n_threads = n_threads
-        os.makedirs(output_dir, exist_ok=True)
+        self.output = RetrievalOutput(output_dir)
 
         proposal = self._prepare_run(resume=resume, flow_kwargs=flow_kwargs)
         start_round = self.completed_rounds
@@ -360,7 +360,10 @@ class Retrieval:
                 initial_round=initial_round,
             )
 
-            self._checkpoint(output_dir, f"retrieval_pre_round_{round_index + 1}.pkl")
+            self._checkpoint(
+                output_dir,
+                self.output.pre_round_checkpoint_name(round_index),
+            )
             self._save_round_data(output_dir, save_data, round_index)
 
             x_norm_tensor = self.do_preprocessing(x_tensor)
@@ -375,13 +378,8 @@ class Retrieval:
 
     def write_setup_log(self, output_dir, run_config=None, filename="retrieval_setup.json"):
         """Write a JSON setup log describing observations, parameters, and run options."""
-        os.makedirs(output_dir, exist_ok=True)
-        path = os.path.join(output_dir, filename)
         payload = self._setup_log_payload(run_config=run_config)
-        with open(path, "w") as file:
-            json.dump(payload, file, indent=2, sort_keys=True)
-            file.write("\n")
-        return path
+        return self._output_manager(output_dir).write_setup_log(payload, filename=filename)
 
     def _setup_log_payload(self, run_config=None):
         return {
@@ -400,7 +398,7 @@ class Retrieval:
                 "setup_log": "retrieval_setup.json",
                 "completed_checkpoint": "retrieval.pkl",
                 "pre_round_checkpoint_pattern": "retrieval_pre_round_<N>.pkl",
-                "saved_data_pattern": "data_<round>.pkl",
+                "saved_data_pattern": "rounds/round_<NNN>/training_data.npz",
             },
         }
 
@@ -480,13 +478,23 @@ class Retrieval:
             raise RuntimeError("Cannot resume retrieval without at least one proposal.")
 
     def _checkpoint(self, output_dir, filename):
-        self.save(os.path.join(output_dir, filename))
+        self._output_manager(output_dir).write_checkpoint(self, filename=filename)
 
     def _save_round_data(self, output_dir, save_data, round_index):
         if save_data:
-            path = os.path.join(output_dir, f"data_{round_index}.pkl")
-            with open(path, "wb") as file:
-                pickle.dump({"par": self.thetas, "spec": self.x}, file)
+            self._output_manager(output_dir).write_round_data(
+                round_index=round_index,
+                thetas=self.thetas,
+                nat_thetas=getattr(self, "nat_thetas", None),
+                spectra=self.x,
+            )
+
+    def _output_manager(self, output_dir):
+        output = getattr(self, "output", None)
+        if output is None or output.output_dir != output_dir:
+            output = RetrievalOutput(output_dir)
+            self.output = output
+        return output
 
     def _sample_round_thetas(
         self,
@@ -511,8 +519,7 @@ class Retrieval:
         round_index=None,
     ):
         print(f"Reusing prior data from {reuse_prior}")
-        with open(reuse_prior, "rb") as file:
-            prior_data = pickle.load(file)
+        prior_data = RetrievalOutput.load_round_data(reuse_prior)
 
         reused_n = min(len(prior_data["par"]), n_samples)
         remaining_n = n_samples - reused_n

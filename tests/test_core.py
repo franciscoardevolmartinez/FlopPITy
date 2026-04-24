@@ -13,6 +13,7 @@ from floppity.helpers import (
     find_MAP,
     reduced_chi_squared,
 )
+from floppity.output import RetrievalOutput
 from floppity.simulators import (
     ARCiS,
     _append_arcis_atmosphere_structure,
@@ -472,6 +473,94 @@ class TestHelpers(unittest.TestCase):
         self.assertFalse(hasattr(loaded, "noisy_x"))
         self.assertFalse(hasattr(loaded, "thetas"))
         self.assertEqual(loaded.completed_rounds, 0)
+
+    def test_output_manager_round_data_npz_round_trip_preserves_keys(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = RetrievalOutput(tmpdir)
+            path = output.write_round_data(
+                round_index=2,
+                thetas=np.array([[0.1, 0.2], [0.3, 0.4]]),
+                nat_thetas=np.array([[1.0, 2.0], [3.0, 4.0]]),
+                spectra={
+                    "obs1": np.array([[10.0, 20.0], [30.0, 40.0]]),
+                    2: np.array([[50.0], [60.0]]),
+                },
+            )
+            loaded = RetrievalOutput.load_round_data(path)
+
+        self.assertTrue(path.endswith(os.path.join("round_002", "training_data.npz")))
+        np.testing.assert_array_equal(
+            loaded["par"],
+            np.array([[0.1, 0.2], [0.3, 0.4]]),
+        )
+        np.testing.assert_array_equal(
+            loaded["nat_par"],
+            np.array([[1.0, 2.0], [3.0, 4.0]]),
+        )
+        self.assertEqual(list(loaded["spec"].keys()), ["obs1", 2])
+        np.testing.assert_array_equal(
+            loaded["spec"]["obs1"],
+            np.array([[10.0, 20.0], [30.0, 40.0]]),
+        )
+
+    def test_save_round_data_writes_npz_archive(self):
+        import tempfile
+        import os
+
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.thetas = np.array([[0.1]])
+        retrieval.nat_thetas = np.array([[1.0]])
+        retrieval.x = {"obs": np.array([[2.0]])}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            retrieval._save_round_data(tmpdir, save_data=True, round_index=1)
+
+            npz_path = os.path.join(tmpdir, "rounds", "round_001", "training_data.npz")
+            pkl_path = os.path.join(tmpdir, "data_1.pkl")
+
+            self.assertTrue(os.path.exists(npz_path))
+            self.assertFalse(os.path.exists(pkl_path))
+
+    def test_reuse_prior_loads_npz_training_data(self):
+        import tempfile
+
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.obs = {
+            "obs": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        retrieval.parameters = {
+            "level": {
+                "min": 0,
+                "max": 10,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = RetrievalOutput(tmpdir).write_round_data(
+                round_index=0,
+                thetas=np.array([[0.2], [0.4]]),
+                spectra={"obs": np.array([[2.0, 2.0], [4.0, 4.0]])},
+            )
+            retrieval._load_or_extend_reused_prior(
+                reuse_prior=path,
+                n_samples=2,
+                sample_prior_method="random",
+                n_threads=1,
+                simulator_kwargs={},
+            )
+
+        np.testing.assert_array_equal(retrieval.thetas, np.array([[0.2], [0.4]]))
+        np.testing.assert_array_equal(retrieval.nat_thetas, np.array([[2.0], [4.0]]))
+        np.testing.assert_array_equal(
+            retrieval.x["obs"],
+            np.array([[2.0, 2.0], [4.0, 4.0]]),
+        )
 
     def test_preprocessing_chain_preserves_tensor_output(self):
         retrieval = Retrieval(flat_simulator, obs_type="trans")

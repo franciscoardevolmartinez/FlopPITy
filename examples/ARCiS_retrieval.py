@@ -1,8 +1,4 @@
-from floppity import Retrieval, helpers
-import numpy as np
-import torch
-import pickle
-from tqdm import trange
+from floppity import Retrieval
 from floppity.simulators import read_ARCiS_input, ARCiS
 
 if __name__ == "__main__":
@@ -36,6 +32,4 @@ if __name__ == "__main__":
 
     R.run(flow_kwargs=flow_kwargs, resume=False, n_threads=2,
           training_kwargs=training_kwargs, simulator_kwargs=ARCiS_kwargs,
-          n_rounds=2, n_samples_init=10, n_samples=10)
-    
-    R.save(ARCiS_kwargs['output_dir']+'retrieval.pkl')
+          n_rounds=2, n_samples_init=10, n_samples=10, save_data=True)
