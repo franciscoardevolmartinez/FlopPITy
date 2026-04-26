@@ -17,6 +17,8 @@ from floppity.output import RetrievalOutput
 from floppity.preprocessing import PCATransformer
 from floppity.simulators import (
     ARCiS,
+    ARCiS_binary,
+    ARCiS_multiple,
     _arcis_atmosphere_columns,
     _arcis_atmosphere_numeric_contents,
     _append_arcis_atmosphere_structure,
@@ -346,6 +348,42 @@ class TestHelpers(unittest.TestCase):
         self.assertIn("model 2", atmosphere)
         self.assertFalse(os.path.exists(os.path.join(output_base, "model000001")))
 
+    def test_arcis_binary_splits_parameters_and_sums_components(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        parameters = np.array([
+            [1.0, 2.0, 10.0, 20.0],
+            [3.0, 4.0, 30.0, 40.0],
+        ])
+        calls = []
+
+        def fake_arcis(obs_arg, component_parameters, thread=0, **kwargs):
+            calls.append((component_parameters.copy(), thread, kwargs["n_components"]))
+            return {
+                "obs1": np.repeat(
+                    component_parameters.sum(axis=1, keepdims=True),
+                    len(obs_arg["obs1"]),
+                    axis=1,
+                )
+            }
+
+        with patch("floppity.simulators.ARCiS", side_effect=fake_arcis):
+            spectra = ARCiS_binary(obs, parameters, thread=5)
+
+        np.testing.assert_array_equal(calls[0][0], parameters[:, :2])
+        np.testing.assert_array_equal(calls[1][0], parameters[:, 2:])
+        self.assertEqual(calls[0][1], "5_component1")
+        self.assertEqual(calls[1][1], "5_component2")
+        self.assertEqual(calls[0][2], 2)
+        np.testing.assert_array_equal(
+            spectra["obs1"],
+            np.array([[33.0, 33.0], [77.0, 77.0]]),
+        )
+
+        with self.assertRaises(ValueError):
+            ARCiS_multiple(obs, np.ones((2, 5)), n_components=2)
+
     def test_round_kwargs_and_arcis_output_reset_are_scoped(self):
         import tempfile
         import os
@@ -360,6 +398,12 @@ class TestHelpers(unittest.TestCase):
                 {"output_dir": tmpdir},
                 round_index=2,
             )
+            retrieval._prepare_simulator_round_outputs(kwargs)
+            self.assertFalse(os.path.exists(output_path))
+
+            with open(output_path, "w") as file:
+                file.write("old")
+            retrieval = Retrieval(ARCiS_binary, obs_type="emis")
             retrieval._prepare_simulator_round_outputs(kwargs)
             self.assertFalse(os.path.exists(output_path))
 

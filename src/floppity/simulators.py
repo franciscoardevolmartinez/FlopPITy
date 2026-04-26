@@ -290,6 +290,66 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
 
     return spectra
 
+
+def ARCiS_binary(obs, parameters, thread=0, **kwargs):
+    """Run a two-component ARCiS model and sum the component spectra."""
+    kwargs = dict(kwargs)
+    kwargs["n_components"] = 2
+    return ARCiS_multiple(obs, parameters, thread=thread, **kwargs)
+
+
+def ARCiS_multiple(obs, parameters, thread=0, **kwargs):
+    """Run and sum multiple ARCiS components.
+
+    Parameters are expected to be stacked component-by-component. For a binary
+    retrieval with ``m`` parameters per object, the first ``m`` columns belong
+    to component 1 and the next ``m`` columns belong to component 2.
+    """
+    n_components = int(kwargs.get("n_components", 2))
+    if n_components <= 0:
+        raise ValueError("n_components must be a positive integer.")
+
+    parameters = np.asarray(parameters)
+    if parameters.ndim != 2:
+        raise ValueError("parameters must be a 2D array.")
+
+    n_samples, n_total_params = parameters.shape
+    if n_total_params % n_components != 0:
+        raise ValueError(
+            f"Parameter count {n_total_params} is not divisible by "
+            f"n_components={n_components}."
+        )
+
+    n_component_params = n_total_params // n_components
+    combined = None
+
+    for component_index in range(n_components):
+        print(f"Computing ARCiS component {component_index + 1}/{n_components}")
+        start = component_index * n_component_params
+        stop = start + n_component_params
+        component_parameters = parameters[:, start:stop]
+
+        component_kwargs = dict(kwargs)
+        component_thread = f"{thread}_component{component_index + 1}"
+        component_spectra = ARCiS(
+            obs,
+            component_parameters,
+            thread=component_thread,
+            **component_kwargs,
+        )
+
+        if combined is None:
+            combined = {
+                key: np.array(value, copy=True)
+                for key, value in component_spectra.items()
+            }
+        else:
+            for key, value in component_spectra.items():
+                combined[key] += value
+
+    return combined
+
+
 def check_ARCiS_status(proc, output_dir, n_models, thread):
     """
     Monitor the progress of a Fortran process generating models.

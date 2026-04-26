@@ -686,7 +686,11 @@ class Retrieval:
         return round_kwargs
 
     def _prepare_simulator_round_outputs(self, simulator_kwargs):
-        if getattr(self.simulator, "__name__", None) != "ARCiS":
+        if getattr(self.simulator, "__name__", None) not in {
+            "ARCiS",
+            "ARCiS_binary",
+            "ARCiS_multiple",
+        }:
             return
         if not simulator_kwargs.get("save_atmosphere", True):
             return

@@ -244,6 +244,46 @@ structures even though the temporary ARCiS model directories are cleaned up.
 
 See `examples/ARCiS_retrieval.py` for a complete script-style example.
 
+### Binary Or Multi-Component ARCiS Models
+
+FlopPITy itself does not need special binary-retrieval logic. It samples
+whatever parameters you define, converts them to physical values, and passes
+the resulting parameter matrix to the simulator. A binary retrieval therefore
+works by defining one block of parameters per component and using a simulator
+that splits those blocks and combines the spectra.
+
+For ARCiS, use `ARCiS_binary`:
+
+```python
+from floppity import Retrieval
+from floppity.simulators import ARCiS_binary
+
+R = Retrieval(ARCiS_binary, obs_type="emis")
+
+# Component 1
+R.add_parameter("teff_1", 500, 2500)
+R.add_parameter("log_h2o_1", -12, -1)
+
+# Component 2
+R.add_parameter("teff_2", 500, 2500)
+R.add_parameter("log_h2o_2", -12, -1)
+
+R.run(
+    simulator_kwargs=ARCiS_kwargs,
+    n_rounds=5,
+    n_samples=256,
+)
+```
+
+`ARCiS_binary` expects the parameter vector to be stacked
+component-by-component. In the example above, the first two columns are sent to
+ARCiS for component 1 and the next two columns are sent to ARCiS for component
+2. The returned model is the direct sum of the component spectra.
+
+For more than two components, use `ARCiS_multiple` and pass
+`"n_components": N` in `simulator_kwargs`. The total number of simulator
+parameters must be divisible by `n_components`.
+
 ## Running Retrievals
 
 The main entrypoint is:
