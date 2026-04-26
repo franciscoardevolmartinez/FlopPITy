@@ -264,6 +264,7 @@ R.run(
     sample_prior_method="sobol",
     reuse_prior=None,
     alpha=0,
+    pca_components=None,
 )
 ```
 
@@ -288,6 +289,8 @@ Important options:
 - `alpha`: posterior inflation fraction. If `alpha > 0`, later rounds sample
   an `alpha` fraction of parameters from the prior and `1 - alpha` from the
   latest uninflated posterior proposal.
+- `pca_components`: optional number of PCA components to train on the
+  preprocessed spectra before they are passed to the neural density estimator.
 - `resume`: continue training from an already trained and loaded retrieval.
 
 ### Sampling Methods
@@ -418,6 +421,37 @@ Available preprocessing functions:
 
 Preprocessing is applied to simulated training spectra and the default
 observation used for posterior conditioning.
+
+### PCA Compression
+
+Large spectra can be compressed before training by passing `pca_components` to
+`run(...)`:
+
+```python
+R.preprocessing = ["log"]
+R.run(
+    n_rounds=5,
+    n_samples=512,
+    pca_components=50,
+)
+```
+
+PCA is fit once on the first generated training batch after the normal
+preprocessing chain has been applied. The fitted transform is stored on the
+retrieval object and reused for every later round, for posterior conditioning,
+and when resuming from `retrieval.pkl`. This keeps the feature space fixed
+across the whole retrieval.
+
+Notes:
+
+- `pca_components=None` disables PCA.
+- If the requested component count is larger than the available rank, FlopPITy
+  uses the largest possible count and reports that adjustment.
+- Older code that passes `n_pca=...` to `run(...)` is still accepted as an alias
+  for `pca_components`.
+- Older code that creates `Retrieval(..., do_pca=True)` is still accepted, but
+  new code should prefer `pca_components` because it makes the component count
+  explicit.
 
 ## Post-Processing Parameters
 

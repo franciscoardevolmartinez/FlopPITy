@@ -14,6 +14,7 @@ from floppity.helpers import (
     reduced_chi_squared,
 )
 from floppity.output import RetrievalOutput
+from floppity.preprocessing import PCATransformer
 from floppity.simulators import (
     ARCiS,
     _arcis_atmosphere_columns,
@@ -664,6 +665,58 @@ class TestHelpers(unittest.TestCase):
         self.assertIsInstance(result, torch.Tensor)
         np.testing.assert_array_equal(result.numpy(), np.array([[0.0, 1.0]]))
 
+    def test_pca_transformer_reduces_arrays_and_tensors(self):
+        x = np.array([
+            [1.0, 2.0, 3.0],
+            [2.0, 3.0, 4.0],
+            [3.0, 4.0, 5.0],
+            [4.0, 5.0, 6.0],
+        ])
+
+        transformer = PCATransformer(2).fit(x)
+        transformed = transformer.transform(x)
+        reconstructed = transformer.inverse_transform(transformed)
+
+        self.assertEqual(transformed.shape, (4, 2))
+        np.testing.assert_allclose(reconstructed, x, atol=1e-12)
+        self.assertEqual(transformer.requested_components, 2)
+        self.assertEqual(transformer.n_components, 2)
+
+        tensor_result = transformer.transform(torch.tensor(x, dtype=torch.float32))
+        self.assertIsInstance(tensor_result, torch.Tensor)
+        self.assertEqual(tuple(tensor_result.shape), (4, 2))
+
+    def test_retrieval_pca_fits_once_after_preprocessing(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans", pca_components=2)
+        retrieval.preprocessing = ["log"]
+        x = torch.tensor([
+            [1.0, 10.0, 100.0],
+            [10.0, 100.0, 1000.0],
+            [100.0, 1000.0, 10000.0],
+        ])
+
+        fitted = retrieval.do_preprocessing(x, fit_pca=True)
+        default = retrieval.do_preprocessing(np.array([[10.0, 100.0, 1000.0]]))
+
+        self.assertIsInstance(fitted, torch.Tensor)
+        self.assertEqual(tuple(fitted.shape), (3, 2))
+        self.assertEqual(default.shape, (1, 2))
+        self.assertTrue(retrieval._pca_is_fitted())
+        np.testing.assert_array_equal(retrieval.pca.mean_, np.array([[1.0, 2.0, 3.0]]))
+
+    def test_pca_resume_requires_saved_transformer(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans", pca_components=2)
+
+        with self.assertRaises(RuntimeError):
+            retrieval._configure_pca(resume=True)
+
+    def test_legacy_n_pca_configures_pca_components(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval._configure_pca(n_pca=3)
+
+        self.assertEqual(retrieval.pca_components, 3)
+        self.assertTrue(retrieval.do_pca)
+
     def test_emission_observations_and_noisy_spectra_are_clipped(self):
         import tempfile
         import os
@@ -719,6 +772,8 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(payload["retrieval"]["obs_type"], "trans")
         self.assertEqual(payload["retrieval"]["simulator"], "test_core.flat_simulator")
         self.assertEqual(payload["retrieval"]["preprocessing"], ["log"])
+        self.assertIsNone(payload["retrieval"]["pca_components"])
+        self.assertFalse(payload["retrieval"]["pca_fitted"])
         self.assertEqual(payload["retrieval"]["error_inflation"], 2)
         self.assertEqual(payload["observations"]["obs1"]["source"], obs_path)
         self.assertEqual(payload["observations"]["obs1"]["shape"], [2, 3])
