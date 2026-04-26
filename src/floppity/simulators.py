@@ -352,7 +352,7 @@ def ARCiS_multiple(obs, parameters, thread=0, **kwargs):
 
 
 class MultiComponentSimulator:
-    """Wrap any FlopPITy simulator as a summed multi-component simulator."""
+    """Wrap any FlopPITy simulator as a multi-component simulator."""
 
     def __init__(
         self,
@@ -361,13 +361,23 @@ class MultiComponentSimulator:
         n_components=2,
         shared_parameters=None,
         combine="sum",
+        component_weights=None,
+        weight_parameter_names=None,
+        normalize_weights=True,
     ):
         self.simulator = simulator
         self.parameter_names = list(parameter_names)
         self.n_components = int(n_components)
         self.shared_parameters = set(shared_parameters or [])
         self.combine = combine
+        self.component_weights = component_weights
+        self.weight_parameter_names = list(weight_parameter_names or [])
+        self.normalize_weights = normalize_weights
         self.__name__ = f"{_callable_name(simulator)}_multi_component"
+        if self.combine == "sum" and (
+            self.component_weights is not None or self.weight_parameter_names
+        ):
+            self.combine = "weighted_sum"
 
         if self.n_components <= 0:
             raise ValueError("n_components must be a positive integer.")
@@ -377,8 +387,30 @@ class MultiComponentSimulator:
                 "shared_parameters contains names that are not in parameter_names: "
                 + ", ".join(str(name) for name in sorted(missing, key=str))
             )
-        if self.combine != "sum":
-            raise ValueError("Only combine='sum' is currently supported.")
+        if self.combine not in {"sum", "weighted_sum"}:
+            raise ValueError("combine must be either 'sum' or 'weighted_sum'.")
+        if self.component_weights is not None and self.weight_parameter_names:
+            raise ValueError(
+                "Use either component_weights or weight_parameters, not both."
+            )
+        if self.component_weights is not None:
+            self.component_weights = np.asarray(self.component_weights, dtype=float)
+            if self.component_weights.shape != (self.n_components,):
+                raise ValueError(
+                    "component_weights must have one value per component."
+                )
+        if (
+            self.weight_parameter_names
+            and len(self.weight_parameter_names) not in {1, self.n_components}
+        ):
+            raise ValueError(
+                "weight_parameters must contain either one binary fraction "
+                "parameter or one weight parameter per component."
+            )
+        if len(self.weight_parameter_names) == 1 and self.n_components != 2:
+            raise ValueError(
+                "A single weight parameter is only defined for two components."
+            )
 
         self.input_parameter_names = self._input_parameter_names()
         self._input_index = {
@@ -396,6 +428,7 @@ class MultiComponentSimulator:
             )
 
         combined = None
+        weights = self._component_weights(parameters)
         for component_index in range(self.n_components):
             component_parameters = self._component_parameters(
                 parameters,
@@ -410,12 +443,15 @@ class MultiComponentSimulator:
 
             if combined is None:
                 combined = {
-                    key: np.array(value, copy=True)
+                    key: self._weighted_spectra(value, weights[:, component_index])
                     for key, value in component_spectra.items()
                 }
             else:
                 for key, value in component_spectra.items():
-                    combined[key] += value
+                    combined[key] += self._weighted_spectra(
+                        value,
+                        weights[:, component_index],
+                    )
         return combined
 
     def _input_parameter_names(self):
@@ -428,6 +464,7 @@ class MultiComponentSimulator:
                     _component_parameter_name(name, component_index)
                     for component_index in range(1, self.n_components + 1)
                 )
+        names.extend(self.weight_parameter_names)
         return names
 
     def _component_parameters(self, parameters, component_index):
@@ -447,6 +484,41 @@ class MultiComponentSimulator:
             ]
         return component_parameters
 
+    def _component_weights(self, parameters):
+        if self.combine == "sum":
+            return np.ones((parameters.shape[0], self.n_components))
+
+        if self.component_weights is not None:
+            weights = np.repeat(
+                self.component_weights.reshape(1, -1),
+                parameters.shape[0],
+                axis=0,
+            )
+        elif len(self.weight_parameter_names) == 1:
+            fraction = parameters[:, self._input_index[self.weight_parameter_names[0]]]
+            weights = np.column_stack([fraction, 1 - fraction])
+        elif len(self.weight_parameter_names) == self.n_components:
+            weights = np.column_stack([
+                parameters[:, self._input_index[name]]
+                for name in self.weight_parameter_names
+            ])
+        else:
+            raise ValueError(
+                "combine='weighted_sum' requires component_weights or "
+                "weight_parameters."
+            )
+
+        if self.normalize_weights:
+            weight_sum = np.sum(weights, axis=1, keepdims=True)
+            if np.any(weight_sum == 0):
+                raise ValueError("Component weights cannot sum to zero.")
+            weights = weights / weight_sum
+        return weights
+
+    @staticmethod
+    def _weighted_spectra(spectra, weights):
+        return np.asarray(spectra) * weights[:, None]
+
 
 def make_multi_component_simulator(
     simulator,
@@ -454,20 +526,32 @@ def make_multi_component_simulator(
     n_components=2,
     shared_parameters=None,
     combine="sum",
+    component_weights=None,
+    weight_parameters=None,
+    normalize_weights=True,
 ):
     """Create a multi-component simulator and matching parameter dictionary."""
     parameter_names = list(base_parameters.keys())
+    normalized_weight_parameters = _normalize_weight_parameters(weight_parameters)
+    if combine == "sum" and (
+        component_weights is not None or normalized_weight_parameters
+    ):
+        combine = "weighted_sum"
     wrapped_simulator = MultiComponentSimulator(
         simulator=simulator,
         parameter_names=parameter_names,
         n_components=n_components,
         shared_parameters=shared_parameters,
         combine=combine,
+        component_weights=component_weights,
+        weight_parameter_names=normalized_weight_parameters.keys(),
+        normalize_weights=normalize_weights,
     )
     parameters = make_multi_component_parameters(
         base_parameters,
         n_components=n_components,
         shared_parameters=shared_parameters,
+        weight_parameters=normalized_weight_parameters,
     )
     return wrapped_simulator, parameters
 
@@ -476,6 +560,7 @@ def make_multi_component_parameters(
     base_parameters,
     n_components=2,
     shared_parameters=None,
+    weight_parameters=None,
 ):
     """Build a reduced multi-component parameter dictionary."""
     n_components = int(n_components)
@@ -500,6 +585,7 @@ def make_multi_component_parameters(
                 parameters[_component_parameter_name(name, component_index)] = deepcopy(
                     metadata
                 )
+    parameters.update(_normalize_weight_parameters(weight_parameters))
     return parameters
 
 
@@ -508,6 +594,9 @@ def make_binary_simulator(
     base_parameters,
     shared_parameters=None,
     combine="sum",
+    component_weights=None,
+    weight_parameters=None,
+    normalize_weights=True,
 ):
     """Create a two-component simulator and matching parameter dictionary."""
     return make_multi_component_simulator(
@@ -516,6 +605,9 @@ def make_binary_simulator(
         n_components=2,
         shared_parameters=shared_parameters,
         combine=combine,
+        component_weights=component_weights,
+        weight_parameters=weight_parameters,
+        normalize_weights=normalize_weights,
     )
 
 
@@ -525,6 +617,26 @@ def _component_parameter_name(name, component_index):
 
 def _callable_name(value):
     return getattr(value, "__name__", value.__class__.__name__)
+
+
+def _normalize_weight_parameters(weight_parameters):
+    if weight_parameters is None:
+        return {}
+    if isinstance(weight_parameters, str):
+        weight_parameters = {weight_parameters: (0, 1)}
+
+    normalized = {}
+    for name, metadata in weight_parameters.items():
+        if isinstance(metadata, dict):
+            item = deepcopy(metadata)
+        else:
+            min_value, max_value = metadata
+            item = {"min": min_value, "max": max_value}
+        item.setdefault("log", False)
+        item.setdefault("post_processing", False)
+        item.setdefault("universal", True)
+        normalized[name] = item
+    return normalized
 
 
 def check_ARCiS_status(proc, output_dir, n_models, thread):

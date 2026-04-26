@@ -266,6 +266,7 @@ binary_simulator, binary_parameters = make_binary_simulator(
     ARCiS,
     base_parameters,
     shared_parameters=["log_h2o", "log_ch4"],
+    weight_parameters={"column_fraction": (0, 1)},
 )
 
 R = Retrieval(binary_simulator, obs_type="emis")
@@ -282,14 +283,29 @@ R.run(
 In this example, `log_h2o` and `log_ch4` are sampled once and reused for both
 components, while all other parameters are duplicated with `_1` and `_2`
 suffixes. This lets you keep shared chemistry while allowing parameters such as
-temperature, radius, or gravity to differ between components.
+temperature, radius, or gravity to differ between components. The
+`column_fraction` parameter is also sampled once; for two components it combines
+the spectra as `column_fraction * component_1 + (1 - column_fraction) *
+component_2`.
 
 The wrapper expects the underlying simulator to accept a single-component
 parameter matrix and return spectra keyed like the observations. It calls that
-simulator once per component and directly sums the returned spectra. If your
-binary model needs radius weighting, flux ratios, dilution, or another
-combination rule, add that combination rule before using it for production
-science.
+simulator once per component and combines the returned spectra.
+
+Combination options:
+
+- Direct sum, useful for additive binary fluxes:
+  `make_binary_simulator(ARCiS, base_parameters, combine="sum")`.
+- Fixed weights, useful when the ratio is known:
+  `make_binary_simulator(ARCiS, base_parameters, component_weights=[0.3, 0.7])`.
+- Sampled binary fraction, useful for two atmospheric columns:
+  `make_binary_simulator(..., weight_parameters={"column_fraction": (0, 1)})`.
+- Sampled weights for `N` components:
+  `make_multi_component_simulator(..., n_components=N, weight_parameters={...})`.
+
+Weights are normalized by default. For example, sampled weights `[1, 1, 2]`
+are applied as `[0.25, 0.25, 0.5]`. Pass `normalize_weights=False` if you want
+absolute multiplicative weights.
 
 For more than two components, use `make_multi_component_simulator` and pass
 `n_components=N`.

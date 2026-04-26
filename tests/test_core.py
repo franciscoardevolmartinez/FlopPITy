@@ -25,6 +25,7 @@ from floppity.simulators import (
     _arcis_obs_file_name,
     make_binary_simulator,
     make_multi_component_parameters,
+    make_multi_component_simulator,
     read_ARCiS_input,
 )
 
@@ -430,6 +431,86 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(calls[0][1], "3_component1")
         self.assertEqual(calls[1][1], "3_component2")
         np.testing.assert_array_equal(spectra["obs1"], np.array([[2200.5, 2200.5]]))
+
+    def test_multi_component_wrapper_supports_fixed_weights(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        base_parameters = {
+            "level": {"min": 0, "max": 10, "post_processing": False},
+        }
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            return {
+                "obs1": np.repeat(parameters, len(obs_arg["obs1"]), axis=1)
+            }
+
+        wrapped_simulator, parameters = make_binary_simulator(
+            simulator,
+            base_parameters,
+            component_weights=[0.25, 0.75],
+        )
+
+        self.assertEqual(list(parameters), ["level_1", "level_2"])
+        spectra = wrapped_simulator(obs, np.array([[4.0, 8.0]]))
+        np.testing.assert_array_equal(spectra["obs1"], np.array([[7.0, 7.0]]))
+
+    def test_multi_component_wrapper_supports_sampled_binary_fraction(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        base_parameters = {
+            "level": {"min": 0, "max": 10, "post_processing": False},
+        }
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            return {
+                "obs1": np.repeat(parameters, len(obs_arg["obs1"]), axis=1)
+            }
+
+        wrapped_simulator, parameters = make_binary_simulator(
+            simulator,
+            base_parameters,
+            weight_parameters={"column_fraction": (0, 1)},
+        )
+
+        self.assertEqual(list(parameters), ["level_1", "level_2", "column_fraction"])
+        spectra = wrapped_simulator(obs, np.array([[10.0, 20.0, 0.25]]))
+        np.testing.assert_array_equal(spectra["obs1"], np.array([[17.5, 17.5]]))
+
+    def test_multi_component_wrapper_supports_arbitrary_weighted_components(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        base_parameters = {
+            "level": {"min": 0, "max": 10, "post_processing": False},
+        }
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            return {
+                "obs1": np.repeat(parameters, len(obs_arg["obs1"]), axis=1)
+            }
+
+        wrapped_simulator, parameters = make_multi_component_simulator(
+            simulator,
+            base_parameters,
+            n_components=3,
+            weight_parameters={
+                "weight_1": (0, 1),
+                "weight_2": (0, 1),
+                "weight_3": (0, 1),
+            },
+        )
+
+        self.assertEqual(
+            list(parameters),
+            ["level_1", "level_2", "level_3", "weight_1", "weight_2", "weight_3"],
+        )
+        spectra = wrapped_simulator(
+            obs,
+            np.array([[10.0, 20.0, 30.0, 1.0, 1.0, 2.0]]),
+        )
+        np.testing.assert_array_equal(spectra["obs1"], np.array([[22.5, 22.5]]))
 
     def test_multi_component_parameter_builder_validates_shared_names(self):
         with self.assertRaises(ValueError):
