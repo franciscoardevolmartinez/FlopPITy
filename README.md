@@ -292,6 +292,12 @@ The wrapper expects the underlying simulator to accept a single-component
 parameter matrix and return spectra keyed like the observations. It calls that
 simulator once per component and combines the returned spectra.
 
+Before simulator calls, each sample's components are sorted by the first
+component-specific parameter in the single-component parameter dictionary, in
+descending order. This removes the label-switching degeneracy where component 1
+and component 2 can otherwise be interchanged. Shared parameters are not used
+for sorting.
+
 Combination options:
 
 - Direct sum, useful for additive binary fluxes:

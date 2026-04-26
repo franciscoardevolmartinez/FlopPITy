@@ -322,13 +322,18 @@ def ARCiS_multiple(obs, parameters, thread=0, **kwargs):
         )
 
     n_component_params = n_total_params // n_components
+    component_blocks = parameters.reshape(n_samples, n_components, n_component_params)
+    component_order = np.argsort(-component_blocks[:, :, 0], axis=1)
+    component_blocks = np.take_along_axis(
+        component_blocks,
+        component_order[:, :, None],
+        axis=1,
+    )
     combined = None
 
     for component_index in range(n_components):
         print(f"Computing ARCiS component {component_index + 1}/{n_components}")
-        start = component_index * n_component_params
-        stop = start + n_component_params
-        component_parameters = parameters[:, start:stop]
+        component_parameters = component_blocks[:, component_index, :]
 
         component_kwargs = dict(kwargs)
         component_thread = f"{thread}_component{component_index + 1}"
@@ -374,6 +379,7 @@ class MultiComponentSimulator:
         self.weight_parameter_names = list(weight_parameter_names or [])
         self.normalize_weights = normalize_weights
         self.__name__ = f"{_callable_name(simulator)}_multi_component"
+        self.sort_parameter_name = self._sort_parameter_name()
         if self.combine == "sum" and (
             self.component_weights is not None or self.weight_parameter_names
         ):
@@ -429,10 +435,13 @@ class MultiComponentSimulator:
 
         combined = None
         weights = self._component_weights(parameters)
+        component_order = self._component_order(parameters)
+        weights = np.take_along_axis(weights, component_order, axis=1)
         for component_index in range(self.n_components):
             component_parameters = self._component_parameters(
                 parameters,
                 component_index,
+                component_order,
             )
             component_spectra = self.simulator(
                 obs,
@@ -467,22 +476,54 @@ class MultiComponentSimulator:
         names.extend(self.weight_parameter_names)
         return names
 
-    def _component_parameters(self, parameters, component_index):
-        component_parameters = np.empty(
-            (parameters.shape[0], len(self.parameter_names)),
+    def _component_parameters(self, parameters, component_index, component_order):
+        all_parameters = np.empty(
+            (parameters.shape[0], self.n_components, len(self.parameter_names)),
             dtype=parameters.dtype,
         )
-        component_number = component_index + 1
-        for output_index, name in enumerate(self.parameter_names):
-            if name in self.shared_parameters:
-                input_name = name
-            else:
-                input_name = _component_parameter_name(name, component_number)
-            component_parameters[:, output_index] = parameters[
+        for original_component_index in range(self.n_components):
+            component_number = original_component_index + 1
+            for output_index, name in enumerate(self.parameter_names):
+                if name in self.shared_parameters:
+                    input_name = name
+                else:
+                    input_name = _component_parameter_name(name, component_number)
+                all_parameters[:, original_component_index, output_index] = parameters[
+                    :,
+                    self._input_index[input_name],
+                ]
+
+        sorted_parameters = np.take_along_axis(
+            all_parameters,
+            component_order[:, :, None],
+            axis=1,
+        )
+        return sorted_parameters[:, component_index, :]
+
+    def _sort_parameter_name(self):
+        for name in self.parameter_names:
+            if name not in self.shared_parameters:
+                return name
+        return None
+
+    def _component_order(self, parameters):
+        if self.sort_parameter_name is None:
+            return np.repeat(
+                np.arange(self.n_components).reshape(1, -1),
+                parameters.shape[0],
+                axis=0,
+            )
+
+        values = np.column_stack([
+            parameters[
                 :,
-                self._input_index[input_name],
+                self._input_index[
+                    _component_parameter_name(self.sort_parameter_name, component)
+                ],
             ]
-        return component_parameters
+            for component in range(1, self.n_components + 1)
+        ])
+        return np.argsort(-values, axis=1)
 
     def _component_weights(self, parameters):
         if self.combine == "sum":

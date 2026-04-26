@@ -374,8 +374,8 @@ class TestHelpers(unittest.TestCase):
         with patch("floppity.simulators.ARCiS", side_effect=fake_arcis):
             spectra = ARCiS_binary(obs, parameters, thread=5)
 
-        np.testing.assert_array_equal(calls[0][0], parameters[:, :2])
-        np.testing.assert_array_equal(calls[1][0], parameters[:, 2:])
+        np.testing.assert_array_equal(calls[0][0], parameters[:, 2:])
+        np.testing.assert_array_equal(calls[1][0], parameters[:, :2])
         self.assertEqual(calls[0][1], "5_component1")
         self.assertEqual(calls[1][1], "5_component2")
         np.testing.assert_array_equal(
@@ -422,11 +422,11 @@ class TestHelpers(unittest.TestCase):
 
         np.testing.assert_array_equal(
             calls[0][0],
-            np.array([[1000.0, 4.0, -4.0]]),
+            np.array([[1200.0, 4.5, -4.0]]),
         )
         np.testing.assert_array_equal(
             calls[1][0],
-            np.array([[1200.0, 4.5, -4.0]]),
+            np.array([[1000.0, 4.0, -4.0]]),
         )
         self.assertEqual(calls[0][1], "3_component1")
         self.assertEqual(calls[1][1], "3_component2")
@@ -477,6 +477,49 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(list(parameters), ["level_1", "level_2", "column_fraction"])
         spectra = wrapped_simulator(obs, np.array([[10.0, 20.0, 0.25]]))
         np.testing.assert_array_equal(spectra["obs1"], np.array([[17.5, 17.5]]))
+
+    def test_multi_component_wrapper_sorts_each_sample_by_first_free_parameter(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1]]),
+        }
+        base_parameters = {
+            "temperature": {"min": 0, "max": 3000, "post_processing": False},
+            "gravity": {"min": 3, "max": 5, "post_processing": False},
+            "chemistry": {"min": -12, "max": -1, "post_processing": False},
+        }
+        calls = []
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            calls.append(parameters.copy())
+            return {"obs1": parameters[:, :1]}
+
+        wrapped_simulator, _ = make_binary_simulator(
+            simulator,
+            base_parameters,
+            shared_parameters=["chemistry"],
+            weight_parameters={"column_fraction": (0, 1)},
+        )
+        theta = np.array([
+            [500.0, 1000.0, 3.5, 4.0, -4.0, 0.25],
+            [1500.0, 700.0, 4.5, 3.0, -5.0, 0.75],
+        ])
+
+        wrapped_simulator(obs, theta)
+
+        np.testing.assert_array_equal(
+            calls[0],
+            np.array([
+                [1000.0, 4.0, -4.0],
+                [1500.0, 4.5, -5.0],
+            ]),
+        )
+        np.testing.assert_array_equal(
+            calls[1],
+            np.array([
+                [500.0, 3.5, -4.0],
+                [700.0, 3.0, -5.0],
+            ]),
+        )
 
     def test_multi_component_wrapper_supports_arbitrary_weighted_components(self):
         obs = {
