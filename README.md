@@ -244,7 +244,7 @@ structures even though the temporary ARCiS model directories are cleaned up.
 
 See `examples/ARCiS_retrieval.py` for a complete script-style example.
 
-### Binary Or Multi-Component ARCiS Models
+### Binary Or Multi-Component Models
 
 FlopPITy itself does not need special binary-retrieval logic. It samples
 whatever parameters you define, converts them to physical values, and passes
@@ -252,21 +252,25 @@ the resulting parameter matrix to the simulator. A binary retrieval therefore
 works by defining one block of parameters per component and using a simulator
 that splits those blocks and combines the spectra.
 
-For ARCiS, use `ARCiS_binary`:
+Use `make_binary_simulator` to wrap any simulator that follows the FlopPITy
+simulator contract:
 
 ```python
 from floppity import Retrieval
-from floppity.simulators import ARCiS_binary
+from floppity.simulators import ARCiS, make_binary_simulator, read_ARCiS_input
 
-R = Retrieval(ARCiS_binary, obs_type="emis")
+arcis_input = "path/to/arcis_input.in"
+base_parameters, obs_dict = read_ARCiS_input(arcis_input)
 
-# Component 1
-R.add_parameter("teff_1", 500, 2500)
-R.add_parameter("log_h2o_1", -12, -1)
+binary_simulator, binary_parameters = make_binary_simulator(
+    ARCiS,
+    base_parameters,
+    shared_parameters=["log_h2o", "log_ch4"],
+)
 
-# Component 2
-R.add_parameter("teff_2", 500, 2500)
-R.add_parameter("log_h2o_2", -12, -1)
+R = Retrieval(binary_simulator, obs_type="emis")
+R.parameters = binary_parameters
+R.get_obs(obs_dict)
 
 R.run(
     simulator_kwargs=ARCiS_kwargs,
@@ -275,14 +279,23 @@ R.run(
 )
 ```
 
-`ARCiS_binary` expects the parameter vector to be stacked
-component-by-component. In the example above, the first two columns are sent to
-ARCiS for component 1 and the next two columns are sent to ARCiS for component
-2. The returned model is the direct sum of the component spectra.
+In this example, `log_h2o` and `log_ch4` are sampled once and reused for both
+components, while all other parameters are duplicated with `_1` and `_2`
+suffixes. This lets you keep shared chemistry while allowing parameters such as
+temperature, radius, or gravity to differ between components.
 
-For more than two components, use `ARCiS_multiple` and pass
-`"n_components": N` in `simulator_kwargs`. The total number of simulator
-parameters must be divisible by `n_components`.
+The wrapper expects the underlying simulator to accept a single-component
+parameter matrix and return spectra keyed like the observations. It calls that
+simulator once per component and directly sums the returned spectra. If your
+binary model needs radius weighting, flux ratios, dilution, or another
+combination rule, add that combination rule before using it for production
+science.
+
+For more than two components, use `make_multi_component_simulator` and pass
+`n_components=N`.
+
+`ARCiS_binary` and `ARCiS_multiple` are still available for older scripts, but
+new code should prefer the generic wrappers.
 
 ## Running Retrievals
 

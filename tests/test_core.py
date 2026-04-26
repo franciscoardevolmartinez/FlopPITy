@@ -23,6 +23,8 @@ from floppity.simulators import (
     _arcis_atmosphere_numeric_contents,
     _append_arcis_atmosphere_structure,
     _arcis_obs_file_name,
+    make_binary_simulator,
+    make_multi_component_parameters,
     read_ARCiS_input,
 )
 
@@ -359,7 +361,7 @@ class TestHelpers(unittest.TestCase):
         calls = []
 
         def fake_arcis(obs_arg, component_parameters, thread=0, **kwargs):
-            calls.append((component_parameters.copy(), thread, kwargs["n_components"]))
+            calls.append((component_parameters.copy(), thread))
             return {
                 "obs1": np.repeat(
                     component_parameters.sum(axis=1, keepdims=True),
@@ -375,7 +377,6 @@ class TestHelpers(unittest.TestCase):
         np.testing.assert_array_equal(calls[1][0], parameters[:, 2:])
         self.assertEqual(calls[0][1], "5_component1")
         self.assertEqual(calls[1][1], "5_component2")
-        self.assertEqual(calls[0][2], 2)
         np.testing.assert_array_equal(
             spectra["obs1"],
             np.array([[33.0, 33.0], [77.0, 77.0]]),
@@ -383,6 +384,59 @@ class TestHelpers(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             ARCiS_multiple(obs, np.ones((2, 5)), n_components=2)
+
+    def test_generic_binary_wrapper_supports_shared_parameters(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        base_parameters = {
+            "temperature": {"min": 500, "max": 2500, "post_processing": False},
+            "gravity": {"min": 3, "max": 5, "post_processing": False},
+            "log_h2o": {"min": -12, "max": -1, "post_processing": False},
+        }
+        calls = []
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            calls.append((parameters.copy(), thread))
+            return {
+                "obs1": np.repeat(
+                    parameters.sum(axis=1, keepdims=True),
+                    len(obs_arg["obs1"]),
+                    axis=1,
+                )
+            }
+
+        binary_simulator, binary_parameters = make_binary_simulator(
+            simulator,
+            base_parameters,
+            shared_parameters=["log_h2o"],
+        )
+        self.assertEqual(
+            list(binary_parameters),
+            ["temperature_1", "temperature_2", "gravity_1", "gravity_2", "log_h2o"],
+        )
+
+        theta = np.array([[1000.0, 1200.0, 4.0, 4.5, -4.0]])
+        spectra = binary_simulator(obs, theta, thread=3)
+
+        np.testing.assert_array_equal(
+            calls[0][0],
+            np.array([[1000.0, 4.0, -4.0]]),
+        )
+        np.testing.assert_array_equal(
+            calls[1][0],
+            np.array([[1200.0, 4.5, -4.0]]),
+        )
+        self.assertEqual(calls[0][1], "3_component1")
+        self.assertEqual(calls[1][1], "3_component2")
+        np.testing.assert_array_equal(spectra["obs1"], np.array([[2200.5, 2200.5]]))
+
+    def test_multi_component_parameter_builder_validates_shared_names(self):
+        with self.assertRaises(ValueError):
+            make_multi_component_parameters(
+                {"temperature": {"min": 0, "max": 1}},
+                shared_parameters=["missing"],
+            )
 
     def test_round_kwargs_and_arcis_output_reset_are_scoped(self):
         import tempfile
@@ -404,6 +458,16 @@ class TestHelpers(unittest.TestCase):
             with open(output_path, "w") as file:
                 file.write("old")
             retrieval = Retrieval(ARCiS_binary, obs_type="emis")
+            retrieval._prepare_simulator_round_outputs(kwargs)
+            self.assertFalse(os.path.exists(output_path))
+
+            with open(output_path, "w") as file:
+                file.write("old")
+            wrapped_arcis, _ = make_binary_simulator(
+                ARCiS,
+                {"temperature": {"min": 0, "max": 1}},
+            )
+            retrieval = Retrieval(wrapped_arcis, obs_type="emis")
             retrieval._prepare_simulator_round_outputs(kwargs)
             self.assertFalse(os.path.exists(output_path))
 

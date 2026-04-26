@@ -4,6 +4,7 @@ import time
 from tqdm import trange, tqdm
 import subprocess
 import fcntl
+from copy import deepcopy
 
 def mock_simulator(obs, pars, thread=0):
     '''
@@ -348,6 +349,182 @@ def ARCiS_multiple(obs, parameters, thread=0, **kwargs):
                 combined[key] += value
 
     return combined
+
+
+class MultiComponentSimulator:
+    """Wrap any FlopPITy simulator as a summed multi-component simulator."""
+
+    def __init__(
+        self,
+        simulator,
+        parameter_names,
+        n_components=2,
+        shared_parameters=None,
+        combine="sum",
+    ):
+        self.simulator = simulator
+        self.parameter_names = list(parameter_names)
+        self.n_components = int(n_components)
+        self.shared_parameters = set(shared_parameters or [])
+        self.combine = combine
+        self.__name__ = f"{_callable_name(simulator)}_multi_component"
+
+        if self.n_components <= 0:
+            raise ValueError("n_components must be a positive integer.")
+        missing = self.shared_parameters.difference(self.parameter_names)
+        if missing:
+            raise ValueError(
+                "shared_parameters contains names that are not in parameter_names: "
+                + ", ".join(str(name) for name in sorted(missing, key=str))
+            )
+        if self.combine != "sum":
+            raise ValueError("Only combine='sum' is currently supported.")
+
+        self.input_parameter_names = self._input_parameter_names()
+        self._input_index = {
+            name: index for index, name in enumerate(self.input_parameter_names)
+        }
+
+    def __call__(self, obs, parameters, thread=0, **kwargs):
+        parameters = np.asarray(parameters)
+        if parameters.ndim != 2:
+            raise ValueError("parameters must be a 2D array.")
+        if parameters.shape[1] != len(self.input_parameter_names):
+            raise ValueError(
+                f"Expected {len(self.input_parameter_names)} parameters for "
+                f"multi-component simulator, got {parameters.shape[1]}."
+            )
+
+        combined = None
+        for component_index in range(self.n_components):
+            component_parameters = self._component_parameters(
+                parameters,
+                component_index,
+            )
+            component_spectra = self.simulator(
+                obs,
+                component_parameters,
+                thread=f"{thread}_component{component_index + 1}",
+                **kwargs,
+            )
+
+            if combined is None:
+                combined = {
+                    key: np.array(value, copy=True)
+                    for key, value in component_spectra.items()
+                }
+            else:
+                for key, value in component_spectra.items():
+                    combined[key] += value
+        return combined
+
+    def _input_parameter_names(self):
+        names = []
+        for name in self.parameter_names:
+            if name in self.shared_parameters:
+                names.append(name)
+            else:
+                names.extend(
+                    _component_parameter_name(name, component_index)
+                    for component_index in range(1, self.n_components + 1)
+                )
+        return names
+
+    def _component_parameters(self, parameters, component_index):
+        component_parameters = np.empty(
+            (parameters.shape[0], len(self.parameter_names)),
+            dtype=parameters.dtype,
+        )
+        component_number = component_index + 1
+        for output_index, name in enumerate(self.parameter_names):
+            if name in self.shared_parameters:
+                input_name = name
+            else:
+                input_name = _component_parameter_name(name, component_number)
+            component_parameters[:, output_index] = parameters[
+                :,
+                self._input_index[input_name],
+            ]
+        return component_parameters
+
+
+def make_multi_component_simulator(
+    simulator,
+    base_parameters,
+    n_components=2,
+    shared_parameters=None,
+    combine="sum",
+):
+    """Create a multi-component simulator and matching parameter dictionary."""
+    parameter_names = list(base_parameters.keys())
+    wrapped_simulator = MultiComponentSimulator(
+        simulator=simulator,
+        parameter_names=parameter_names,
+        n_components=n_components,
+        shared_parameters=shared_parameters,
+        combine=combine,
+    )
+    parameters = make_multi_component_parameters(
+        base_parameters,
+        n_components=n_components,
+        shared_parameters=shared_parameters,
+    )
+    return wrapped_simulator, parameters
+
+
+def make_multi_component_parameters(
+    base_parameters,
+    n_components=2,
+    shared_parameters=None,
+):
+    """Build a reduced multi-component parameter dictionary."""
+    n_components = int(n_components)
+    if n_components <= 0:
+        raise ValueError("n_components must be a positive integer.")
+
+    shared_parameters = set(shared_parameters or [])
+    parameter_names = list(base_parameters.keys())
+    missing = shared_parameters.difference(parameter_names)
+    if missing:
+        raise ValueError(
+            "shared_parameters contains names that are not in base_parameters: "
+            + ", ".join(str(name) for name in sorted(missing, key=str))
+        )
+
+    parameters = {}
+    for name, metadata in base_parameters.items():
+        if name in shared_parameters:
+            parameters[name] = deepcopy(metadata)
+        else:
+            for component_index in range(1, n_components + 1):
+                parameters[_component_parameter_name(name, component_index)] = deepcopy(
+                    metadata
+                )
+    return parameters
+
+
+def make_binary_simulator(
+    simulator,
+    base_parameters,
+    shared_parameters=None,
+    combine="sum",
+):
+    """Create a two-component simulator and matching parameter dictionary."""
+    return make_multi_component_simulator(
+        simulator=simulator,
+        base_parameters=base_parameters,
+        n_components=2,
+        shared_parameters=shared_parameters,
+        combine=combine,
+    )
+
+
+def _component_parameter_name(name, component_index):
+    return f"{name}_{component_index}"
+
+
+def _callable_name(value):
+    return getattr(value, "__name__", value.__class__.__name__)
 
 
 def check_ARCiS_status(proc, output_dir, n_models, thread):

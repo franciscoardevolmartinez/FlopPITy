@@ -484,6 +484,8 @@ class Retrieval:
         name = getattr(value, "__name__", None)
         if module and name:
             return f"{module}.{name}"
+        if name:
+            return name
         return str(value)
 
     def _prepare_run(self, resume, flow_kwargs):
@@ -686,11 +688,14 @@ class Retrieval:
         return round_kwargs
 
     def _prepare_simulator_round_outputs(self, simulator_kwargs):
-        if getattr(self.simulator, "__name__", None) not in {
+        simulator_name = getattr(self.simulator, "__name__", None)
+        base_simulator = getattr(self.simulator, "simulator", None)
+        base_simulator_name = getattr(base_simulator, "__name__", None)
+        if simulator_name not in {
             "ARCiS",
             "ARCiS_binary",
             "ARCiS_multiple",
-        }:
+        } and base_simulator_name != "ARCiS":
             return
         if not simulator_kwargs.get("save_atmosphere", True):
             return
