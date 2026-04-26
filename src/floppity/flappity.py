@@ -29,7 +29,7 @@ TRANSIENT_STATE = {
 class Retrieval:
     """Simulation-based atmospheric retrieval driver."""
 
-    def __init__(self, simulator, obs_type):
+    def __init__(self, simulator, obs_type, pca_components=None, do_pca=False):
         """
         Parameters
         ----------
@@ -39,12 +39,23 @@ class Retrieval:
             keyed like ``obs``.
         obs_type : str
             Observation type, either ``"emis"`` or ``"trans"``.
+        pca_components : int, optional
+            Number of PCA components to train on preprocessed spectra. PCA is
+            disabled when omitted.
+        do_pca : bool, optional
+            Legacy switch for enabling PCA. Prefer ``pca_components`` for new
+            code.
         """
         self.simulator = simulator
         self.parameters = {}
         self.preprocessing = None
         self.obs_type = obs_type
         self.completed_rounds = 0
+        self.pca_components = (
+            100 if do_pca and pca_components is None else pca_components
+        )
+        self.pca = None
+        self.do_pca = self.pca_components is not None
 
     def save(self, fname, **options):
         """Save this retrieval object with cloudpickle."""
@@ -65,6 +76,9 @@ class Retrieval:
         self.completed_rounds = getattr(
             self, "completed_rounds", max(len(getattr(self, "proposals", [])) - 1, 0)
         )
+        self.pca_components = getattr(self, "pca_components", None)
+        self.pca = getattr(self, "pca", None)
+        self.do_pca = getattr(self, "do_pca", self.pca_components is not None)
 
     @classmethod
     def load(cls, fname):
@@ -305,6 +319,8 @@ class Retrieval:
         sample_prior_method="sobol",
         reuse_prior=None,
         alpha=0,
+        pca_components=None,
+        n_pca=None,
     ):
         """
         Run SNPE-C retrieval rounds.
@@ -320,6 +336,11 @@ class Retrieval:
         simulator_kwargs = {} if simulator_kwargs is None else simulator_kwargs
         n_samples_init = n_samples if n_samples_init is None else n_samples_init
         self._validate_alpha(alpha)
+        self._configure_pca(
+            pca_components=pca_components,
+            n_pca=n_pca,
+            resume=resume,
+        )
 
         self.n_threads = n_threads
         self.alpha = alpha
@@ -345,6 +366,7 @@ class Retrieval:
                 "sample_prior_method": sample_prior_method,
                 "reuse_prior": reuse_prior,
                 "alpha": alpha,
+                "pca_components": self.pca_components,
                 "start_round": start_round,
                 "final_round": start_round + n_rounds,
             },
@@ -374,7 +396,10 @@ class Retrieval:
             )
             self._save_round_data(output_dir, save_data, round_index)
 
-            x_norm_tensor = self.do_preprocessing(x_tensor)
+            x_norm_tensor = self.do_preprocessing(
+                x_tensor,
+                fit_pca=self._pca_enabled() and not self._pca_is_fitted(),
+            )
             self.train(theta_tensor, x_norm_tensor, proposal, **training_kwargs)
             self.get_posterior()
 
@@ -398,6 +423,8 @@ class Retrieval:
                 "obs_type": self.obs_type,
                 "simulator": self._callable_name(self.simulator),
                 "preprocessing": self.preprocessing,
+                "pca_components": getattr(self, "pca_components", None),
+                "pca_fitted": self._pca_is_fitted(),
                 "completed_rounds": self.completed_rounds,
                 "error_inflation": getattr(self, "error_inflation", None),
             },
@@ -457,6 +484,8 @@ class Retrieval:
         name = getattr(value, "__name__", None)
         if module and name:
             return f"{module}.{name}"
+        if name:
+            return name
         return str(value)
 
     def _prepare_run(self, resume, flow_kwargs):
@@ -494,6 +523,39 @@ class Retrieval:
     def _validate_alpha(alpha):
         if alpha < 0 or alpha > 1:
             raise ValueError("alpha must be between 0 and 1.")
+
+    def _configure_pca(self, pca_components=None, n_pca=None, resume=False):
+        if n_pca is not None:
+            if pca_components is not None and int(pca_components) != int(n_pca):
+                raise ValueError("pca_components and n_pca specify different values.")
+            pca_components = n_pca
+
+        if pca_components is not None:
+            pca_components = int(pca_components)
+            if pca_components <= 0:
+                raise ValueError("pca_components must be a positive integer.")
+            fitted_components = getattr(self.pca, "requested_components", None)
+            if resume and self._pca_is_fitted() and pca_components != fitted_components:
+                raise ValueError(
+                    "Cannot change pca_components after PCA has been fitted."
+                )
+            self.pca_components = pca_components
+
+        self.do_pca = self.pca_components is not None
+        if not resume and self._pca_enabled():
+            self.pca = None
+        if resume and self._pca_enabled() and not self._pca_is_fitted():
+            raise RuntimeError(
+                "Cannot resume with PCA enabled because the loaded retrieval "
+                "does not contain a fitted PCA transformer."
+            )
+
+    def _pca_enabled(self):
+        return getattr(self, "pca_components", None) is not None
+
+    def _pca_is_fitted(self):
+        pca = getattr(self, "pca", None)
+        return pca is not None and getattr(pca, "fitted", False)
 
     def _next_proposal(self, posterior, alpha):
         if alpha == 0:
@@ -626,7 +688,14 @@ class Retrieval:
         return round_kwargs
 
     def _prepare_simulator_round_outputs(self, simulator_kwargs):
-        if getattr(self.simulator, "__name__", None) != "ARCiS":
+        simulator_name = getattr(self.simulator, "__name__", None)
+        base_simulator = getattr(self.simulator, "simulator", None)
+        base_simulator_name = getattr(base_simulator, "__name__", None)
+        if simulator_name not in {
+            "ARCiS",
+            "ARCiS_binary",
+            "ARCiS_multiple",
+        } and base_simulator_name != "ARCiS":
             return
         if not simulator_kwargs.get("save_atmosphere", True):
             return
@@ -685,19 +754,31 @@ class Retrieval:
             )
             self.noisy_x[key] = self.augmented_x[key] + noise
 
-    def do_preprocessing(self, x):
-        """Apply configured preprocessing functions to an array or tensor."""
-        if self.preprocessing is None:
-            return x
-
+    def do_preprocessing(self, x, fit_pca=False):
+        """Apply configured preprocessing and optional fitted PCA."""
         xnorm = x
-        for function_name in self.preprocessing:
+        for function_name in self.preprocessing or []:
             preprocessing_fun = getattr(preprocessing, function_name)
             if isinstance(xnorm, torch.Tensor):
                 xnorm = preprocessing_fun(xnorm.cpu().numpy())
-                xnorm = torch.tensor(xnorm, dtype=torch.float32)
+                xnorm = torch.as_tensor(
+                    xnorm,
+                    dtype=x.dtype,
+                    device=x.device,
+                )
             else:
                 xnorm = preprocessing_fun(xnorm)
+
+        if self._pca_enabled():
+            if fit_pca:
+                self.pca = preprocessing.PCATransformer(self.pca_components)
+                self.pca.fit(xnorm)
+            if not self._pca_is_fitted():
+                raise RuntimeError(
+                    "PCA is enabled but has not been fitted. Run preprocessing "
+                    "on training spectra with fit_pca=True first."
+                )
+            xnorm = self.pca.transform(xnorm)
         return xnorm
 
     def do_postprocessing(self):

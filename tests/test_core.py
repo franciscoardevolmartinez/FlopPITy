@@ -14,12 +14,18 @@ from floppity.helpers import (
     reduced_chi_squared,
 )
 from floppity.output import RetrievalOutput
+from floppity.preprocessing import PCATransformer
 from floppity.simulators import (
     ARCiS,
+    ARCiS_binary,
+    ARCiS_multiple,
     _arcis_atmosphere_columns,
     _arcis_atmosphere_numeric_contents,
     _append_arcis_atmosphere_structure,
     _arcis_obs_file_name,
+    make_binary_simulator,
+    make_multi_component_parameters,
+    make_multi_component_simulator,
     read_ARCiS_input,
 )
 
@@ -345,6 +351,174 @@ class TestHelpers(unittest.TestCase):
         self.assertIn("model 2", atmosphere)
         self.assertFalse(os.path.exists(os.path.join(output_base, "model000001")))
 
+    def test_arcis_binary_splits_parameters_and_sums_components(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        parameters = np.array([
+            [1.0, 2.0, 10.0, 20.0],
+            [3.0, 4.0, 30.0, 40.0],
+        ])
+        calls = []
+
+        def fake_arcis(obs_arg, component_parameters, thread=0, **kwargs):
+            calls.append((component_parameters.copy(), thread))
+            return {
+                "obs1": np.repeat(
+                    component_parameters.sum(axis=1, keepdims=True),
+                    len(obs_arg["obs1"]),
+                    axis=1,
+                )
+            }
+
+        with patch("floppity.simulators.ARCiS", side_effect=fake_arcis):
+            spectra = ARCiS_binary(obs, parameters, thread=5)
+
+        np.testing.assert_array_equal(calls[0][0], parameters[:, :2])
+        np.testing.assert_array_equal(calls[1][0], parameters[:, 2:])
+        self.assertEqual(calls[0][1], "5_component1")
+        self.assertEqual(calls[1][1], "5_component2")
+        np.testing.assert_array_equal(
+            spectra["obs1"],
+            np.array([[33.0, 33.0], [77.0, 77.0]]),
+        )
+
+        with self.assertRaises(ValueError):
+            ARCiS_multiple(obs, np.ones((2, 5)), n_components=2)
+
+    def test_generic_binary_wrapper_supports_shared_parameters(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        base_parameters = {
+            "temperature": {"min": 500, "max": 2500, "post_processing": False},
+            "gravity": {"min": 3, "max": 5, "post_processing": False},
+            "log_h2o": {"min": -12, "max": -1, "post_processing": False},
+        }
+        calls = []
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            calls.append((parameters.copy(), thread))
+            return {
+                "obs1": np.repeat(
+                    parameters.sum(axis=1, keepdims=True),
+                    len(obs_arg["obs1"]),
+                    axis=1,
+                )
+            }
+
+        binary_simulator, binary_parameters = make_binary_simulator(
+            simulator,
+            base_parameters,
+            shared_parameters=["log_h2o"],
+        )
+        self.assertEqual(
+            list(binary_parameters),
+            ["temperature_1", "temperature_2", "gravity_1", "gravity_2", "log_h2o"],
+        )
+
+        theta = np.array([[1000.0, 1200.0, 4.0, 4.5, -4.0]])
+        spectra = binary_simulator(obs, theta, thread=3)
+
+        np.testing.assert_array_equal(
+            calls[0][0],
+            np.array([[1000.0, 4.0, -4.0]]),
+        )
+        np.testing.assert_array_equal(
+            calls[1][0],
+            np.array([[1200.0, 4.5, -4.0]]),
+        )
+        self.assertEqual(calls[0][1], "3_component1")
+        self.assertEqual(calls[1][1], "3_component2")
+        np.testing.assert_array_equal(spectra["obs1"], np.array([[2200.5, 2200.5]]))
+
+    def test_multi_component_wrapper_supports_fixed_weights(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        base_parameters = {
+            "level": {"min": 0, "max": 10, "post_processing": False},
+        }
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            return {
+                "obs1": np.repeat(parameters, len(obs_arg["obs1"]), axis=1)
+            }
+
+        wrapped_simulator, parameters = make_binary_simulator(
+            simulator,
+            base_parameters,
+            component_weights=[0.25, 0.75],
+        )
+
+        self.assertEqual(list(parameters), ["level_1", "level_2"])
+        spectra = wrapped_simulator(obs, np.array([[4.0, 8.0]]))
+        np.testing.assert_array_equal(spectra["obs1"], np.array([[7.0, 7.0]]))
+
+    def test_multi_component_wrapper_supports_sampled_binary_fraction(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        base_parameters = {
+            "level": {"min": 0, "max": 10, "post_processing": False},
+        }
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            return {
+                "obs1": np.repeat(parameters, len(obs_arg["obs1"]), axis=1)
+            }
+
+        wrapped_simulator, parameters = make_binary_simulator(
+            simulator,
+            base_parameters,
+            weight_parameters={"column_fraction": (0, 1)},
+        )
+
+        self.assertEqual(list(parameters), ["level_1", "level_2", "column_fraction"])
+        spectra = wrapped_simulator(obs, np.array([[10.0, 20.0, 0.25]]))
+        np.testing.assert_array_equal(spectra["obs1"], np.array([[17.5, 17.5]]))
+
+    def test_multi_component_wrapper_supports_arbitrary_weighted_components(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.1]]),
+        }
+        base_parameters = {
+            "level": {"min": 0, "max": 10, "post_processing": False},
+        }
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            return {
+                "obs1": np.repeat(parameters, len(obs_arg["obs1"]), axis=1)
+            }
+
+        wrapped_simulator, parameters = make_multi_component_simulator(
+            simulator,
+            base_parameters,
+            n_components=3,
+            weight_parameters={
+                "weight_1": (0, 1),
+                "weight_2": (0, 1),
+                "weight_3": (0, 1),
+            },
+        )
+
+        self.assertEqual(
+            list(parameters),
+            ["level_1", "level_2", "level_3", "weight_1", "weight_2", "weight_3"],
+        )
+        spectra = wrapped_simulator(
+            obs,
+            np.array([[10.0, 20.0, 30.0, 1.0, 1.0, 2.0]]),
+        )
+        np.testing.assert_array_equal(spectra["obs1"], np.array([[22.5, 22.5]]))
+
+    def test_multi_component_parameter_builder_validates_shared_names(self):
+        with self.assertRaises(ValueError):
+            make_multi_component_parameters(
+                {"temperature": {"min": 0, "max": 1}},
+                shared_parameters=["missing"],
+            )
+
     def test_round_kwargs_and_arcis_output_reset_are_scoped(self):
         import tempfile
         import os
@@ -359,6 +533,22 @@ class TestHelpers(unittest.TestCase):
                 {"output_dir": tmpdir},
                 round_index=2,
             )
+            retrieval._prepare_simulator_round_outputs(kwargs)
+            self.assertFalse(os.path.exists(output_path))
+
+            with open(output_path, "w") as file:
+                file.write("old")
+            retrieval = Retrieval(ARCiS_binary, obs_type="emis")
+            retrieval._prepare_simulator_round_outputs(kwargs)
+            self.assertFalse(os.path.exists(output_path))
+
+            with open(output_path, "w") as file:
+                file.write("old")
+            wrapped_arcis, _ = make_binary_simulator(
+                ARCiS,
+                {"temperature": {"min": 0, "max": 1}},
+            )
+            retrieval = Retrieval(wrapped_arcis, obs_type="emis")
             retrieval._prepare_simulator_round_outputs(kwargs)
             self.assertFalse(os.path.exists(output_path))
 
@@ -664,6 +854,58 @@ class TestHelpers(unittest.TestCase):
         self.assertIsInstance(result, torch.Tensor)
         np.testing.assert_array_equal(result.numpy(), np.array([[0.0, 1.0]]))
 
+    def test_pca_transformer_reduces_arrays_and_tensors(self):
+        x = np.array([
+            [1.0, 2.0, 3.0],
+            [2.0, 3.0, 4.0],
+            [3.0, 4.0, 5.0],
+            [4.0, 5.0, 6.0],
+        ])
+
+        transformer = PCATransformer(2).fit(x)
+        transformed = transformer.transform(x)
+        reconstructed = transformer.inverse_transform(transformed)
+
+        self.assertEqual(transformed.shape, (4, 2))
+        np.testing.assert_allclose(reconstructed, x, atol=1e-12)
+        self.assertEqual(transformer.requested_components, 2)
+        self.assertEqual(transformer.n_components, 2)
+
+        tensor_result = transformer.transform(torch.tensor(x, dtype=torch.float32))
+        self.assertIsInstance(tensor_result, torch.Tensor)
+        self.assertEqual(tuple(tensor_result.shape), (4, 2))
+
+    def test_retrieval_pca_fits_once_after_preprocessing(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans", pca_components=2)
+        retrieval.preprocessing = ["log"]
+        x = torch.tensor([
+            [1.0, 10.0, 100.0],
+            [10.0, 100.0, 1000.0],
+            [100.0, 1000.0, 10000.0],
+        ])
+
+        fitted = retrieval.do_preprocessing(x, fit_pca=True)
+        default = retrieval.do_preprocessing(np.array([[10.0, 100.0, 1000.0]]))
+
+        self.assertIsInstance(fitted, torch.Tensor)
+        self.assertEqual(tuple(fitted.shape), (3, 2))
+        self.assertEqual(default.shape, (1, 2))
+        self.assertTrue(retrieval._pca_is_fitted())
+        np.testing.assert_array_equal(retrieval.pca.mean_, np.array([[1.0, 2.0, 3.0]]))
+
+    def test_pca_resume_requires_saved_transformer(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans", pca_components=2)
+
+        with self.assertRaises(RuntimeError):
+            retrieval._configure_pca(resume=True)
+
+    def test_legacy_n_pca_configures_pca_components(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval._configure_pca(n_pca=3)
+
+        self.assertEqual(retrieval.pca_components, 3)
+        self.assertTrue(retrieval.do_pca)
+
     def test_emission_observations_and_noisy_spectra_are_clipped(self):
         import tempfile
         import os
@@ -719,6 +961,8 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(payload["retrieval"]["obs_type"], "trans")
         self.assertEqual(payload["retrieval"]["simulator"], "test_core.flat_simulator")
         self.assertEqual(payload["retrieval"]["preprocessing"], ["log"])
+        self.assertIsNone(payload["retrieval"]["pca_components"])
+        self.assertFalse(payload["retrieval"]["pca_fitted"])
         self.assertEqual(payload["retrieval"]["error_inflation"], 2)
         self.assertEqual(payload["observations"]["obs1"]["source"], obs_path)
         self.assertEqual(payload["observations"]["obs1"]["shape"], [2, 3])
