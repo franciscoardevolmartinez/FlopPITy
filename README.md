@@ -35,24 +35,19 @@ Each observation file is a plain text table with at least three columns:
 import numpy as np
 from floppity import Retrieval
 
-
 def simulator(obs, parameters, thread=0, **kwargs):
     """Return model spectra keyed like obs.
 
     parameters has shape (n_samples, n_parameters).
     Each returned spectrum has shape (n_samples, n_wavelengths).
     """
-    temperature = parameters[:, 0]
     spectra = {}
 
     for key, obs_array in obs.items():
         wavelength = obs_array[:, 0]
-        model = np.ones((len(parameters), len(wavelength)))
-        model *= temperature[:, None] / 1000.0
-        spectra[key] = model
+        spectra[key] = # array of shape (n_samples, n_wavelengths)
 
     return spectra
-
 
 R = Retrieval(simulator, obs_type="trans")
 
