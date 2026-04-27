@@ -83,18 +83,6 @@ return {
 }
 ```
 
-## Transmission Spectra
-
-Emission is the default observation type. For transmission retrievals, pass
-`obs_type="trans"`:
-
-```python
-R = Retrieval(simulator, obs_type="trans")
-```
-
-Emission retrievals clip non-positive observed and simulated values to avoid
-problems with log-style preprocessing.
-
 ## Retrieval with ARCiS
 
 FlopPITy comes with an ARCiS wrapper by default that can import the observations and parameters from an ARCiS input file. The workflow would then be:
