@@ -7,6 +7,7 @@ import cloudpickle as pickle
 import numpy as np
 import torch
 from scipy.stats.qmc import LatinHypercube, Sobol
+from tqdm import tqdm
 
 from floppity import helpers
 from floppity.output import RetrievalOutput
@@ -848,7 +849,14 @@ class Retrieval:
                 )
 
         if getattr(self, "fit_radius", False):
+            print("Fitting best-fit radius scales for simulated emission spectra.")
             self._fit_and_apply_radius_scale()
+            print(
+                "Best-fit radii [R_reference units]: "
+                f"min={np.nanmin(self.best_fit_radii):.4g}, "
+                f"median={np.nanmedian(self.best_fit_radii):.4g}, "
+                f"max={np.nanmax(self.best_fit_radii):.4g}"
+            )
 
         for par_idx, key in enumerate(self.parameters):
             if not self.parameters[key]["post_processing"]:
@@ -889,31 +897,51 @@ class Retrieval:
     def _best_fit_radius_scales(self, spectra):
         numerator = np.zeros(self.n_samples)
         denominator = np.zeros(self.n_samples)
-
-        for obs_key, model in spectra.items():
+        chunk_size = 1024
+        total_chunks = 0
+        for obs_key in spectra:
             obs = self.obs[obs_key]
-            observed = obs[:, 1]
-            uncertainty = obs[:, 2]
             valid = (
-                np.isfinite(observed)
-                & np.isfinite(uncertainty)
-                & (uncertainty > 0)
+                np.isfinite(obs[:, 1])
+                & np.isfinite(obs[:, 2])
+                & (obs[:, 2] > 0)
             )
-            if not np.any(valid):
-                continue
+            if np.any(valid):
+                total_chunks += int(np.ceil(self.n_samples / chunk_size))
 
-            weights = 1.0 / uncertainty[valid] ** 2
-            model_valid = np.asarray(model)[:, valid]
-            finite_model = np.isfinite(model_valid)
-            weighted_model = np.where(finite_model, model_valid, 0.0)
-            numerator += np.sum(
-                weighted_model * observed[valid] * weights,
-                axis=1,
-            )
-            denominator += np.sum(
-                weighted_model * weighted_model * weights,
-                axis=1,
-            )
+        with tqdm(
+            total=total_chunks,
+            desc="Fitting radii",
+            unit="chunk",
+        ) as progress:
+            for obs_key, model in spectra.items():
+                obs = self.obs[obs_key]
+                observed = obs[:, 1]
+                uncertainty = obs[:, 2]
+                valid = (
+                    np.isfinite(observed)
+                    & np.isfinite(uncertainty)
+                    & (uncertainty > 0)
+                )
+                if not np.any(valid):
+                    continue
+
+                weights = 1.0 / uncertainty[valid] ** 2
+                model = np.asarray(model)
+                for start in range(0, self.n_samples, chunk_size):
+                    end = min(start + chunk_size, self.n_samples)
+                    model_valid = model[start:end, valid]
+                    finite_model = np.isfinite(model_valid)
+                    weighted_model = np.where(finite_model, model_valid, 0.0)
+                    numerator[start:end] += np.sum(
+                        weighted_model * observed[valid] * weights,
+                        axis=1,
+                    )
+                    denominator[start:end] += np.sum(
+                        weighted_model * weighted_model * weights,
+                        axis=1,
+                    )
+                    progress.update()
 
         scales = np.divide(
             numerator,

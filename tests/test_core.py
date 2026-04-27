@@ -1,5 +1,7 @@
 import unittest
 from unittest.mock import patch
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import numpy as np
 import torch
@@ -226,12 +228,16 @@ class TestHelpers(unittest.TestCase):
         retrieval.parameters = {}
         retrieval._configure_radius_fit(fit_radius=True, radius_reference=1.0)
 
-        retrieval.do_postprocessing()
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            retrieval.do_postprocessing()
 
         np.testing.assert_allclose(retrieval.best_fit_radius_scales[0], 2.0)
         np.testing.assert_allclose(retrieval.best_fit_radii[0], np.sqrt(2.0))
         np.testing.assert_allclose(retrieval.post_x["obs1"][0], np.array([2.0, 4.0]))
         np.testing.assert_allclose(retrieval.post_x["obs2"][0], np.array([6.0]))
+        self.assertIn("Fitting best-fit radius scales", stdout.getvalue())
+        self.assertIn("Best-fit radii", stdout.getvalue())
 
     def test_best_fit_radius_respects_bounds(self):
         retrieval = Retrieval(lambda obs, pars: {}, obs_type="emis")
