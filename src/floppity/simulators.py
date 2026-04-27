@@ -4,6 +4,7 @@ import time
 from tqdm import trange, tqdm
 import subprocess
 import fcntl
+import shutil
 from copy import deepcopy
 
 def mock_simulator(obs, pars, thread=0):
@@ -159,6 +160,8 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
               from each ARCiS model directory. Defaults to mixingratios.dat.
             - atmosphere_output (str): Combined atmosphere filename. Defaults
               to mixingratios_round_<round>.dat.
+            - log_dir (str): Directory for ARCiS logs. Relative paths are
+              created inside output_dir. Defaults to arcis_logs.
 
     Returns
     -------
@@ -180,7 +183,9 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
         'atmosphere_output',
         f'mixingratios_round_{round_index}.dat'
     )
+    log_dir = _arcis_log_dir(output_dir, kwargs.get('log_dir', 'arcis_logs'))
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
 
     # Copy and modify input file
     input_copy = os.path.join(output_dir, os.path.basename(input_file))
@@ -214,7 +219,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     np.savetxt(param_file, parameters)
 
     # Run ARCiS
-    log_files = [f for f in os.listdir(output_dir) if f.startswith(f'arcis_run_{thread}_') and f.endswith('.log')]
+    log_files = [f for f in os.listdir(log_dir) if f.startswith(f'arcis_run_{thread}_') and f.endswith('.log')]
     log_nums = []
     for f in log_files:
         try:
@@ -223,7 +228,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
         except ValueError:
             continue
     next_log_num = max(log_nums) + 1 if log_nums else 1
-    log_file = os.path.join(output_dir, f'arcis_run_{thread}_{next_log_num}.log')
+    log_file = os.path.join(log_dir, f'arcis_run_{thread}_{next_log_num}.log')
 
     with open(log_file, 'w') as log:
         try:
@@ -275,21 +280,18 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     for k in spectra:
         spectra[k] = np.array(spectra[k])  # shape: (n_spectra, n_points)
 
-    #Remove files
+    # Remove temporary ARCiS model output.
     print('Removing files...')
-    for root, dirs, files in os.walk(output_base, topdown=False):
-        for file in files:
-            os.remove(os.path.join(root, file))
-        for dir in dirs:
-            dir_path = os.path.join(root, dir)
-            for sub_root, sub_dirs, sub_files in os.walk(dir_path, topdown=False):
-                for sub_file in sub_files:
-                    os.remove(os.path.join(sub_root, sub_file))
-                for sub_dir in sub_dirs:
-                    os.rmdir(os.path.join(sub_root, sub_dir))
-            os.rmdir(dir_path)
+    shutil.rmtree(output_base, ignore_errors=True)
 
     return spectra
+
+
+def _arcis_log_dir(output_dir, log_dir):
+    """Return the directory where ARCiS subprocess logs should be written."""
+    if os.path.isabs(log_dir):
+        return log_dir
+    return os.path.join(output_dir, log_dir)
 
 
 def ARCiS_binary(obs, parameters, thread=0, **kwargs):

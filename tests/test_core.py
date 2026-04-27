@@ -404,6 +404,10 @@ class TestHelpers(unittest.TestCase):
                 atmosphere = file.read()
 
             output_base = os.path.join(tmpdir, "outputARCiS_1")
+            log_dir = os.path.join(tmpdir, "arcis_logs")
+            output_base_exists = os.path.exists(output_base)
+            log_exists = os.path.exists(os.path.join(log_dir, "arcis_run_1_1.log"))
+            root_log_exists = os.path.exists(os.path.join(tmpdir, "arcis_run_1_1.log"))
 
         np.testing.assert_array_equal(
             spectra["obs1"],
@@ -417,7 +421,9 @@ class TestHelpers(unittest.TestCase):
         self.assertIn("# round=7 global_model=11 thread=1 local_model=1", atmosphere)
         self.assertIn("model 1", atmosphere)
         self.assertIn("model 2", atmosphere)
-        self.assertFalse(os.path.exists(os.path.join(output_base, "model000001")))
+        self.assertFalse(output_base_exists)
+        self.assertTrue(log_exists)
+        self.assertFalse(root_log_exists)
 
     def test_arcis_binary_splits_parameters_and_sums_components(self):
         obs = {

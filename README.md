@@ -233,9 +233,12 @@ ARCiS wrapper notes:
 - `atmosphere_file` defaults to `"mixingratios.dat"`.
 - `atmosphere_output` can override the output filename. By default the wrapper
   writes `mixingratios_round_<round>.dat` in the ARCiS output directory.
+- `log_dir` controls where ARCiS subprocess logs are written. Relative paths
+  are created inside `output_dir`; the default is `arcis_logs`.
 - The wrapper forces or adds `makeai=.true.` in a copied input file.
-- Temporary ARCiS model directories are removed after spectra are read.
-- ARCiS logs are written inside the ARCiS output directory.
+- Temporary `outputARCiS_*` directories are removed after spectra and
+  atmosphere structures are read.
+- ARCiS logs are collected under the configured log directory.
 
 The combined atmosphere file contains one block per simulated model, prefixed
 by a comment with the retrieval round, global model index, thread index, local
