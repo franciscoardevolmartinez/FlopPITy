@@ -25,6 +25,7 @@ from floppity.simulators import (
     _arcis_atmosphere_numeric_contents,
     _append_arcis_atmosphere_structure,
     _arcis_obs_file_name,
+    _remove_arcis_output,
     make_binary_simulator,
     make_multi_component_parameters,
     make_multi_component_simulator,
@@ -359,6 +360,21 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(_arcis_obs_file_name("obs1"), "obs001")
         self.assertEqual(_arcis_obs_file_name("obs12"), "obs012")
         self.assertEqual(_arcis_obs_file_name("miri"), "miri")
+
+    def test_remove_arcis_output_removes_top_level_directory(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_base = os.path.join(tmpdir, "outputARCiS_0_component1")
+            model_dir = os.path.join(output_base, "model000001")
+            os.makedirs(model_dir)
+            with open(os.path.join(model_dir, "obs001"), "w") as file:
+                file.write("1 2\n")
+
+            _remove_arcis_output(output_base)
+
+            self.assertFalse(os.path.exists(output_base))
 
     def test_arcis_wrapper_reads_spectra_collects_atmospheres_and_cleans_models(self):
         import tempfile

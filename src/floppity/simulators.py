@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import sys
 import time
 from tqdm import trange, tqdm
 import subprocess
@@ -280,9 +281,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     for k in spectra:
         spectra[k] = np.array(spectra[k])  # shape: (n_spectra, n_points)
 
-    # Remove temporary ARCiS model output.
-    print('Removing files...')
-    shutil.rmtree(output_base, ignore_errors=True)
+    _remove_arcis_output(output_base)
 
     return spectra
 
@@ -292,6 +291,37 @@ def _arcis_log_dir(output_dir, log_dir):
     if os.path.isabs(log_dir):
         return log_dir
     return os.path.join(output_dir, log_dir)
+
+
+def _remove_arcis_output(output_base):
+    """Remove an ARCiS output tree with visible progress."""
+    if not os.path.exists(output_base):
+        return
+
+    print(f"Removing temporary ARCiS output: {output_base}")
+    paths = []
+    for root, dirs, files in os.walk(output_base, topdown=False):
+        paths.extend(os.path.join(root, file) for file in files)
+        paths.extend(os.path.join(root, directory) for directory in dirs)
+
+    for path in tqdm(
+        paths,
+        desc="Cleaning ARCiS output",
+        unit="path",
+        file=sys.stdout,
+    ):
+        try:
+            if os.path.isdir(path):
+                os.rmdir(path)
+            else:
+                os.remove(path)
+        except FileNotFoundError:
+            continue
+
+    try:
+        os.rmdir(output_base)
+    except OSError:
+        shutil.rmtree(output_base, ignore_errors=True)
 
 
 def ARCiS_binary(obs, parameters, thread=0, **kwargs):

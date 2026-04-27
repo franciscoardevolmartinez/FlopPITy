@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import multiprocessing as mp
 from datetime import datetime, timezone
@@ -849,13 +850,19 @@ class Retrieval:
                 )
 
         if getattr(self, "fit_radius", False):
-            print("Fitting best-fit radius scales for simulated emission spectra.")
+            print(
+                "Fitting best-fit radius scales for simulated emission spectra.",
+                flush=True,
+            )
+            start_time = time.perf_counter()
             self._fit_and_apply_radius_scale()
+            elapsed = time.perf_counter() - start_time
             print(
                 "Best-fit radii [R_reference units]: "
                 f"min={np.nanmin(self.best_fit_radii):.4g}, "
                 f"median={np.nanmedian(self.best_fit_radii):.4g}, "
-                f"max={np.nanmax(self.best_fit_radii):.4g}"
+                f"max={np.nanmax(self.best_fit_radii):.4g} "
+                f"computed in {elapsed:.1f} s"
             )
 
         for par_idx, key in enumerate(self.parameters):
@@ -913,6 +920,7 @@ class Retrieval:
             total=total_chunks,
             desc="Fitting radii",
             unit="chunk",
+            file=sys.stdout,
         ) as progress:
             for obs_key, model in spectra.items():
                 obs = self.obs[obs_key]
