@@ -16,6 +16,8 @@ plotting, PCA, and post-processing, see [docs/detailed_guide.md](docs/detailed_g
 FlopPITy supports Python `>=3.10, <3.13`.
 
 ```bash
+conda create -n floppity_env python=3.12.9
+conda activate floppity_env
 pip install floppity
 ```
 
