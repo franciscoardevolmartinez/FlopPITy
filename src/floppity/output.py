@@ -1,5 +1,6 @@
 import json
 import os
+import glob
 
 import cloudpickle as pickle
 import numpy as np
@@ -20,6 +21,18 @@ class RetrievalOutput:
 
     def pre_round_checkpoint_name(self, round_index):
         return f"retrieval_pre_round_{round_index + 1}.pkl"
+
+    def cleanup_pre_round_checkpoints(self, keep_filename=None):
+        """Remove old pre-round checkpoints, optionally keeping one file."""
+        keep_path = (
+            self.checkpoint_path(keep_filename)
+            if keep_filename is not None
+            else None
+        )
+        for path in glob.glob(self.checkpoint_path("retrieval_pre_round_*.pkl")):
+            if keep_path is not None and os.path.abspath(path) == os.path.abspath(keep_path):
+                continue
+            os.remove(path)
 
     def round_dir(self, round_index):
         return os.path.join(self.output_dir, "rounds", f"round_{round_index:03d}")

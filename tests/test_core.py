@@ -265,6 +265,21 @@ class TestHelpers(unittest.TestCase):
         with self.assertRaises(ValueError):
             retrieval._configure_radius_fit(fit_radius=True)
 
+    def test_radius_fit_warns_when_radius_is_still_sampled(self):
+        retrieval = Retrieval(lambda obs, pars: {}, obs_type="emis")
+        retrieval.parameters = {
+            "radius": {
+                "min": 0.5,
+                "max": 2.0,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+        }
+
+        with self.assertWarnsRegex(RuntimeWarning, "radius-like"):
+            retrieval._configure_radius_fit(fit_radius=True)
+
     def test_radius_fit_happens_before_flux_offsets(self):
         retrieval = Retrieval(lambda obs, pars: {}, obs_type="emis")
         retrieval.obs = {"obs": np.array([[1.0, 5.0, 1.0]])}
@@ -427,9 +442,16 @@ class TestHelpers(unittest.TestCase):
 
             output_base = os.path.join(tmpdir, "outputARCiS_1")
             log_dir = os.path.join(tmpdir, "arcis_logs")
+            parameter_grid_dir = os.path.join(tmpdir, "parameter_grids")
             output_base_exists = os.path.exists(output_base)
             log_exists = os.path.exists(os.path.join(log_dir, "arcis_run_1_1.log"))
             root_log_exists = os.path.exists(os.path.join(tmpdir, "arcis_run_1_1.log"))
+            parameter_grid_exists = os.path.exists(
+                os.path.join(parameter_grid_dir, "parametergridfile_1.dat")
+            )
+            root_parameter_grid_exists = os.path.exists(
+                os.path.join(tmpdir, "parametergridfile_1.dat")
+            )
 
         np.testing.assert_array_equal(
             spectra["obs1"],
@@ -446,6 +468,8 @@ class TestHelpers(unittest.TestCase):
         self.assertFalse(output_base_exists)
         self.assertTrue(log_exists)
         self.assertFalse(root_log_exists)
+        self.assertTrue(parameter_grid_exists)
+        self.assertFalse(root_parameter_grid_exists)
 
     def test_arcis_binary_splits_parameters_and_sums_components(self):
         obs = {
@@ -615,6 +639,84 @@ class TestHelpers(unittest.TestCase):
                 [500.0, 3.5, -4.0],
                 [700.0, 3.0, -5.0],
             ]),
+        )
+
+    def test_multi_component_wrapper_canonicalizes_training_parameters(self):
+        base_parameters = {
+            "temperature": {"min": 0, "max": 3000, "post_processing": False},
+            "gravity": {"min": 3, "max": 5, "post_processing": False},
+            "chemistry": {"min": -12, "max": -1, "post_processing": False},
+        }
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            return {"obs1": parameters[:, :1]}
+
+        wrapped_simulator, _ = make_binary_simulator(
+            simulator,
+            base_parameters,
+            shared_parameters=["chemistry"],
+            weight_parameters={"column_fraction": (0, 1)},
+        )
+        theta = np.array([
+            [0.2, 0.8, 0.1, 0.9, 0.5, 0.25],
+            [0.9, 0.3, 0.7, 0.2, 0.4, 0.75],
+        ])
+        nat_theta = np.array([
+            [500.0, 1000.0, 3.5, 4.0, -4.0, 0.25],
+            [1500.0, 700.0, 4.5, 3.0, -5.0, 0.75],
+        ])
+
+        sorted_theta, sorted_nat_theta = wrapped_simulator.canonicalize_parameters(
+            theta,
+            nat_theta,
+        )
+
+        np.testing.assert_array_equal(
+            sorted_nat_theta,
+            np.array([
+                [1000.0, 500.0, 4.0, 3.5, -4.0, 0.75],
+                [1500.0, 700.0, 4.5, 3.0, -5.0, 0.75],
+            ]),
+        )
+        np.testing.assert_array_equal(
+            sorted_theta,
+            np.array([
+                [0.8, 0.2, 0.9, 0.1, 0.5, 0.75],
+                [0.9, 0.3, 0.7, 0.2, 0.4, 0.75],
+            ]),
+        )
+
+    def test_retrieval_canonicalizes_current_thetas_before_simulation(self):
+        obs = {
+            "obs1": np.array([[1.0, 0.0, 0.1]]),
+        }
+        base_parameters = {
+            "temperature": {"min": 0, "max": 3000, "post_processing": False},
+            "gravity": {"min": 3, "max": 5, "post_processing": False},
+        }
+
+        def simulator(obs_arg, parameters, thread=0, **kwargs):
+            return {"obs1": parameters[:, :1]}
+
+        wrapped_simulator, parameters = make_binary_simulator(
+            simulator,
+            base_parameters,
+        )
+        retrieval = Retrieval(wrapped_simulator, obs_type="emis")
+        retrieval.obs = obs
+        retrieval.parameters = parameters
+        retrieval.thetas = np.array([[0.2, 0.8, 0.1, 0.9]])
+        retrieval.nat_thetas = np.array([[500.0, 1000.0, 3.5, 4.0]])
+
+        retrieval._canonicalize_current_thetas()
+
+        np.testing.assert_array_equal(
+            retrieval.nat_thetas,
+            np.array([[1000.0, 500.0, 4.0, 3.5]]),
+        )
+        np.testing.assert_array_equal(
+            retrieval.thetas,
+            np.array([[0.8, 0.2, 0.9, 0.1]]),
         )
 
     def test_multi_component_wrapper_supports_arbitrary_weighted_components(self):
@@ -934,6 +1036,34 @@ class TestHelpers(unittest.TestCase):
             np.array([[11.0, 21.0], [31.0, 41.0]]),
         )
 
+    def test_output_manager_cleans_old_pre_round_checkpoints(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = RetrievalOutput(tmpdir)
+            for name in [
+                "retrieval_pre_round_1.pkl",
+                "retrieval_pre_round_2.pkl",
+                "retrieval_pre_round_3.pkl",
+            ]:
+                with open(os.path.join(tmpdir, name), "w") as file:
+                    file.write("checkpoint")
+
+            output.cleanup_pre_round_checkpoints(
+                keep_filename="retrieval_pre_round_3.pkl"
+            )
+
+            self.assertFalse(
+                os.path.exists(os.path.join(tmpdir, "retrieval_pre_round_1.pkl"))
+            )
+            self.assertFalse(
+                os.path.exists(os.path.join(tmpdir, "retrieval_pre_round_2.pkl"))
+            )
+            self.assertTrue(
+                os.path.exists(os.path.join(tmpdir, "retrieval_pre_round_3.pkl"))
+            )
+
     def test_save_round_data_writes_npz_archive(self):
         import tempfile
         import os
@@ -1121,6 +1251,138 @@ class TestHelpers(unittest.TestCase):
             "test_core.flat_simulator",
         )
         self.assertEqual(payload["outputs"]["completed_checkpoint"], "retrieval.pkl")
+
+    def test_from_setup_rebuilds_retrieval_and_run_config(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            obs_path = os.path.join(tmpdir, "obs.txt")
+            np.savetxt(obs_path, np.array([[1.0, 10.0, 0.1]]))
+            setup_path = os.path.join(tmpdir, "retrieval_setup.json")
+            payload = {
+                "retrieval": {
+                    "obs_type": "trans",
+                    "simulator": "test_core.flat_simulator",
+                    "preprocessing": ["log"],
+                    "pca_components": None,
+                    "error_inflation": 2,
+                    "fit_radius": False,
+                    "radius_reference": 1.0,
+                },
+                "observations": {
+                    "obs1": {"source": obs_path},
+                },
+                "parameters": {
+                    "level": {
+                        "min": 0.0,
+                        "max": 1.0,
+                        "log": False,
+                        "post_processing": False,
+                        "universal": True,
+                    },
+                },
+                "run": {
+                    "n_rounds": 2,
+                    "n_samples": 8,
+                    "start_round": 0,
+                    "final_round": 2,
+                    "flow_kwargs": {"hidden": 16},
+                    "simulator_kwargs": {"cache_dir": os.path.join(tmpdir, "missing")},
+                },
+            }
+            with open(setup_path, "w") as file:
+                json.dump(payload, file)
+
+            with self.assertWarnsRegex(RuntimeWarning, "simulator_kwargs"):
+                retrieval = Retrieval.from_setup(
+                    setup_path,
+                    run_overrides={
+                        "n_rounds": 1,
+                        "flow_kwargs": {"dropout": 0.1},
+                    },
+                )
+
+        self.assertIs(retrieval.simulator, flat_simulator)
+        self.assertEqual(retrieval.obs_type, "trans")
+        self.assertEqual(retrieval.preprocessing, ["log"])
+        self.assertEqual(retrieval.error_inflation, 2)
+        self.assertEqual(list(retrieval.obs), ["obs1"])
+        self.assertEqual(retrieval.parameters["level"]["max"], 1.0)
+        self.assertEqual(retrieval.setup_run_config["n_rounds"], 1)
+        self.assertNotIn("start_round", retrieval.setup_run_config)
+        self.assertNotIn("final_round", retrieval.setup_run_config)
+        self.assertEqual(retrieval.setup_run_config["flow_kwargs"]["hidden"], 16)
+        self.assertEqual(retrieval.setup_run_config["flow_kwargs"]["dropout"], 0.1)
+
+    def test_from_setup_warns_for_unavailable_simulator_and_missing_observation(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            setup_path = os.path.join(tmpdir, "retrieval_setup.json")
+            payload = {
+                "retrieval": {
+                    "obs_type": "trans",
+                    "simulator": "missing.module.simulator",
+                    "error_inflation": 1,
+                },
+                "observations": {
+                    "obs": {"source": os.path.join(tmpdir, "missing_obs.txt")},
+                },
+                "parameters": {},
+                "run": {},
+            }
+            with open(setup_path, "w") as file:
+                json.dump(payload, file)
+
+            with self.assertWarns(RuntimeWarning) as caught:
+                with self.assertRaises(FileNotFoundError):
+                    Retrieval.from_setup(setup_path)
+
+        messages = "\n".join(str(item.message) for item in caught.warnings)
+        self.assertIn("Could not import simulator", messages)
+        self.assertIn("observation path", messages)
+
+    def test_run_from_setup_applies_overrides(self):
+        import tempfile
+        import os
+
+        calls = []
+
+        def fake_run(self, **kwargs):
+            calls.append(kwargs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            obs_path = os.path.join(tmpdir, "obs.txt")
+            np.savetxt(obs_path, np.array([[1.0, 10.0, 0.1]]))
+            setup_path = os.path.join(tmpdir, "retrieval_setup.json")
+            payload = {
+                "retrieval": {
+                    "obs_type": "trans",
+                    "simulator": "test_core.flat_simulator",
+                    "error_inflation": 1,
+                },
+                "observations": {"obs": {"source": obs_path}},
+                "parameters": {},
+                "run": {
+                    "n_rounds": 5,
+                    "simulator_kwargs": {"output_dir": "old"},
+                },
+            }
+            with open(setup_path, "w") as file:
+                json.dump(payload, file)
+
+            with patch.object(Retrieval, "run", fake_run):
+                retrieval = Retrieval.run_from_setup(
+                    setup_path,
+                    n_rounds=1,
+                    simulator_kwargs={"output_dir": "new"},
+                )
+
+        self.assertIsInstance(retrieval, Retrieval)
+        self.assertEqual(calls[0]["n_rounds"], 1)
+        self.assertEqual(calls[0]["simulator_kwargs"]["output_dir"], "new")
 
 if __name__ == "__main__":
     unittest.main()

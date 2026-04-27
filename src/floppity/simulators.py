@@ -163,6 +163,9 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
               to mixingratios_round_<round>.dat.
             - log_dir (str): Directory for ARCiS logs. Relative paths are
               created inside output_dir. Defaults to arcis_logs.
+            - parameter_grid_dir (str): Directory for ARCiS parameter grid
+              files. Relative paths are created inside output_dir. Defaults to
+              parameter_grids.
 
     Returns
     -------
@@ -185,8 +188,13 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
         f'mixingratios_round_{round_index}.dat'
     )
     log_dir = _arcis_log_dir(output_dir, kwargs.get('log_dir', 'arcis_logs'))
+    parameter_grid_dir = _arcis_output_subdir(
+        output_dir,
+        kwargs.get('parameter_grid_dir', 'parameter_grids'),
+    )
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(parameter_grid_dir, exist_ok=True)
 
     # Copy and modify input file
     input_copy = os.path.join(output_dir, os.path.basename(input_file))
@@ -216,7 +224,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     obs_files = [_arcis_obs_file_name(key) for key in obs_indices]
 
     # Write parameter grid file
-    param_file = os.path.join(output_dir, f'parametergridfile_{thread}.dat')
+    param_file = os.path.join(parameter_grid_dir, f'parametergridfile_{thread}.dat')
     np.savetxt(param_file, parameters)
 
     # Run ARCiS
@@ -288,9 +296,14 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
 
 def _arcis_log_dir(output_dir, log_dir):
     """Return the directory where ARCiS subprocess logs should be written."""
-    if os.path.isabs(log_dir):
-        return log_dir
-    return os.path.join(output_dir, log_dir)
+    return _arcis_output_subdir(output_dir, log_dir)
+
+
+def _arcis_output_subdir(output_dir, path):
+    """Return an ARCiS output subdirectory, respecting absolute paths."""
+    if os.path.isabs(path):
+        return path
+    return os.path.join(output_dir, path)
 
 
 def _remove_arcis_output(output_base):
@@ -531,6 +544,55 @@ class MultiComponentSimulator:
             axis=1,
         )
         return sorted_parameters[:, component_index, :]
+
+    def canonicalize_parameters(self, unit_parameters, natural_parameters):
+        """Sort component-labelled parameters into the simulator's component order."""
+        natural_parameters = np.asarray(natural_parameters)
+        unit_parameters = np.asarray(unit_parameters)
+        component_order = self._component_order(natural_parameters)
+        if np.all(component_order == np.arange(self.n_components)):
+            return unit_parameters, natural_parameters
+
+        return (
+            self._canonicalize_parameter_array(unit_parameters, component_order),
+            self._canonicalize_parameter_array(natural_parameters, component_order),
+        )
+
+    def _canonicalize_parameter_array(self, parameters, component_order):
+        sorted_parameters = np.array(parameters, copy=True)
+        for name in self.parameter_names:
+            if name in self.shared_parameters:
+                continue
+            component_indices = [
+                self._input_index[_component_parameter_name(name, component_number)]
+                for component_number in range(1, self.n_components + 1)
+            ]
+            values = parameters[:, component_indices]
+            sorted_parameters[:, component_indices] = np.take_along_axis(
+                values,
+                component_order,
+                axis=1,
+            )
+
+        if len(self.weight_parameter_names) == self.n_components:
+            weight_indices = [
+                self._input_index[name]
+                for name in self.weight_parameter_names
+            ]
+            values = parameters[:, weight_indices]
+            sorted_parameters[:, weight_indices] = np.take_along_axis(
+                values,
+                component_order,
+                axis=1,
+            )
+        elif len(self.weight_parameter_names) == 1 and self.n_components == 2:
+            weight_index = self._input_index[self.weight_parameter_names[0]]
+            swapped = component_order[:, 0] == 1
+            sorted_parameters[swapped, weight_index] = (
+                1 - sorted_parameters[swapped, weight_index]
+            )
+
+        return sorted_parameters
 
     def _sort_parameter_name(self):
         for name in self.parameter_names:

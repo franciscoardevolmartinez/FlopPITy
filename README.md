@@ -235,10 +235,15 @@ ARCiS wrapper notes:
   writes `mixingratios_round_<round>.dat` in the ARCiS output directory.
 - `log_dir` controls where ARCiS subprocess logs are written. Relative paths
   are created inside `output_dir`; the default is `arcis_logs`.
+- `parameter_grid_dir` controls where ARCiS parameter grid files are written.
+  Relative paths are created inside `output_dir`; the default is
+  `parameter_grids`.
 - The wrapper forces or adds `makeai=.true.` in a copied input file.
 - Temporary `outputARCiS_*` directories are removed after spectra and
   atmosphere structures are read.
 - ARCiS logs are collected under the configured log directory.
+- Parameter grid files are collected under the configured parameter-grid
+  directory.
 
 The combined atmosphere file contains one block per simulated model, prefixed
 by a comment with the retrieval round, global model index, thread index, local
@@ -418,6 +423,11 @@ observations for each model and multiplies the spectra by that scale. Since
 emission flux scales as `R ** 2`, the fitted radius is
 `radius_reference * sqrt(scale)`.
 
+Do not include radius as a sampled retrieval parameter when `fit_radius=True`.
+The option fits an additional multiplicative flux scale; if the simulator is
+already changing radius internally, the fitted value is only the extra scale
+relative to whatever radius the simulator used.
+
 If `save_data=True`, fitted radii are saved in each
 `rounds/round_<NNN>/training_data.npz` file as `fitted_radii`. This option is
 currently a single global scale for the full model spectrum. For binary or
@@ -480,7 +490,8 @@ R = Retrieval.load("retrieval.pkl")
   sources and shapes, parameter metadata, preprocessing, simulator name,
   `flow_kwargs`, `training_kwargs`, and `simulator_kwargs`.
 - `retrieval_pre_round_<N>.pkl`: state after generating data for round `N`, but
-  before training that round.
+  before training that round. FlopPITy keeps only the latest pre-round
+  checkpoint and removes older ones.
 - `retrieval.pkl`: state after each successfully completed training round.
 - `rounds/round_<NNN>/training_data.npz`: optional per-round training arrays
   written when `save_data=True`. These archives store the sampled unit-cube
@@ -523,6 +534,41 @@ R.run(
 
 When `resume=True`, FlopPITy samples from the last stored posterior proposal.
 It does not repeat the initial prior-sampling round.
+
+### Re-running From A Setup Log
+
+You can rebuild a retrieval from a previous `retrieval_setup.json`:
+
+```python
+from floppity import Retrieval
+
+R = Retrieval.from_setup("old_output/retrieval_setup.json")
+```
+
+This restores the simulator, observations, parameter dictionary,
+preprocessing, and saved run options. If the simulator cannot be imported from
+the dotted name stored in the JSON, FlopPITy warns and you can pass it
+explicitly:
+
+```python
+R = Retrieval.from_setup("old_output/retrieval_setup.json", simulator=my_simulator)
+```
+
+Run directly from the setup log with optional overrides:
+
+```python
+R = Retrieval.run_from_setup(
+    "old_output/retrieval_setup.json",
+    output_dir="rerun_output",
+    n_rounds=3,
+    simulator_kwargs={"output_dir": "rerun_arcis_outputs"},
+)
+```
+
+Overrides are merged into the saved run configuration. Nested dictionaries such
+as `flow_kwargs`, `training_kwargs`, and `simulator_kwargs` can override a few
+entries without rewriting the whole dictionary. FlopPITy warns about paths from
+the setup log that no longer exist so you can edit the JSON or pass overrides.
 
 ## Preprocessing
 

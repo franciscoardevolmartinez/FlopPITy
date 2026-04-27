@@ -1,7 +1,11 @@
 import os
 import sys
 import time
+import copy
+import importlib
+import json
 import multiprocessing as mp
+import warnings
 from datetime import datetime, timezone
 
 import cloudpickle as pickle
@@ -89,6 +93,173 @@ class Retrieval:
         """Load a retrieval object from disk."""
         with open(fname, "rb") as file:
             return pickle.load(file)
+
+    @classmethod
+    def from_setup(cls, setup_path, simulator=None, run_overrides=None):
+        """Rebuild a retrieval object from a ``retrieval_setup.json`` file.
+
+        The setup log stores importable simulator names as strings. If that
+        simulator cannot be imported, pass ``simulator=...`` explicitly.
+        Missing paths are reported as warnings so callers can edit the setup or
+        provide overrides before running.
+        """
+        setup = cls._load_setup_payload(setup_path)
+        run_config = cls._setup_run_config(setup, run_overrides=run_overrides)
+        simulator = simulator or cls._import_setup_simulator(setup)
+        retrieval = cls(
+            simulator,
+            obs_type=setup.get("retrieval", {}).get("obs_type"),
+            pca_components=setup.get("retrieval", {}).get("pca_components"),
+        )
+        retrieval.setup_payload = setup
+        retrieval.setup_path = os.fspath(setup_path)
+        retrieval.setup_run_config = run_config
+        retrieval.parameters = copy.deepcopy(setup.get("parameters", {}))
+        retrieval.preprocessing = setup.get("retrieval", {}).get("preprocessing")
+
+        observation_paths = cls._setup_observation_paths(setup)
+        cls._warn_missing_setup_paths(observation_paths, "observation")
+        retrieval.get_obs(
+            observation_paths,
+            error_inflation=setup.get("retrieval", {}).get("error_inflation", 1),
+        )
+        cls._warn_missing_paths_in_value(
+            run_config.get("simulator_kwargs", {}),
+            context="simulator_kwargs",
+        )
+        return retrieval
+
+    @classmethod
+    def run_from_setup(
+        cls,
+        setup_path,
+        simulator=None,
+        run_overrides=None,
+        **overrides,
+    ):
+        """Rebuild and run a retrieval from a setup log.
+
+        ``run_overrides`` and keyword arguments override values stored in the
+        setup log. Nested dictionaries such as ``simulator_kwargs`` are merged.
+        """
+        run_overrides = cls._merge_setup_overrides(run_overrides, overrides)
+        retrieval = cls.from_setup(
+            setup_path,
+            simulator=simulator,
+            run_overrides=run_overrides,
+        )
+        run_config = dict(retrieval.setup_run_config)
+        run_config.pop("start_round", None)
+        run_config.pop("final_round", None)
+        retrieval.run(**run_config)
+        return retrieval
+
+    @staticmethod
+    def _load_setup_payload(setup_path):
+        with open(setup_path) as file:
+            return json.load(file)
+
+    @classmethod
+    def _setup_run_config(cls, setup, run_overrides=None):
+        run_config = copy.deepcopy(setup.get("run", {}))
+        run_config.pop("start_round", None)
+        run_config.pop("final_round", None)
+        retrieval_config = setup.get("retrieval", {})
+        for key in ("fit_radius", "radius_bounds", "radius_reference"):
+            if key in retrieval_config and key not in run_config:
+                run_config[key] = retrieval_config[key]
+        return cls._merge_setup_overrides(run_config, run_overrides or {})
+
+    @staticmethod
+    def _merge_setup_overrides(base, overrides):
+        merged = copy.deepcopy(base or {})
+        for key, value in (overrides or {}).items():
+            if (
+                isinstance(value, dict)
+                and isinstance(merged.get(key), dict)
+            ):
+                merged[key] = Retrieval._merge_setup_overrides(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    @classmethod
+    def _import_setup_simulator(cls, setup):
+        simulator_name = setup.get("retrieval", {}).get("simulator")
+        simulator = cls._import_dotted_name(simulator_name)
+        if simulator is None:
+            warnings.warn(
+                f"Could not import simulator {simulator_name!r} from setup log. "
+                "Pass simulator=... to Retrieval.from_setup(...) or "
+                "Retrieval.run_from_setup(...).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return _UnavailableSetupSimulator(simulator_name)
+        return simulator
+
+    @staticmethod
+    def _import_dotted_name(dotted_name):
+        if not dotted_name or "." not in str(dotted_name):
+            return None
+        module_name, name = str(dotted_name).rsplit(".", 1)
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            return None
+        return getattr(module, name, None)
+
+    @staticmethod
+    def _setup_observation_paths(setup):
+        observations = setup.get("observations", {})
+        return {
+            _deserialize_setup_key(key): entry.get("source")
+            for key, entry in observations.items()
+            if entry.get("source") is not None
+        }
+
+    @classmethod
+    def _warn_missing_setup_paths(cls, paths, context):
+        for key, path in paths.items():
+            if path and not os.path.exists(path):
+                warnings.warn(
+                    f"Setup {context} path for {key!r} does not exist: {path}",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+
+    @classmethod
+    def _warn_missing_paths_in_value(cls, value, context):
+        for path in cls._path_like_strings(value):
+            if not os.path.exists(path):
+                warnings.warn(
+                    f"Setup path in {context} does not exist: {path}",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+
+    @classmethod
+    def _path_like_strings(cls, value):
+        if isinstance(value, dict):
+            paths = []
+            for item in value.values():
+                paths.extend(cls._path_like_strings(item))
+            return paths
+        if isinstance(value, (list, tuple)):
+            paths = []
+            for item in value:
+                paths.extend(cls._path_like_strings(item))
+            return paths
+        if not isinstance(value, str):
+            return []
+        expanded = os.path.expanduser(value)
+        if (
+            os.path.isabs(expanded)
+            or os.path.sep in expanded
+            or (os.path.altsep and os.path.altsep in expanded)
+        ):
+            return [expanded]
+        return []
 
     def get_obs(self, fnames, error_inflation=1, obs_names=None):
         """Read observation files and store them in ``self.obs``.
@@ -405,10 +576,9 @@ class Retrieval:
                 initial_round=initial_round,
             )
 
-            self._checkpoint(
-                output_dir,
-                self.output.pre_round_checkpoint_name(round_index),
-            )
+            pre_round_checkpoint = self.output.pre_round_checkpoint_name(round_index)
+            self._checkpoint(output_dir, pre_round_checkpoint)
+            self.output.cleanup_pre_round_checkpoints(keep_filename=pre_round_checkpoint)
             self._save_round_data(output_dir, save_data, round_index)
 
             x_norm_tensor = self.do_preprocessing(
@@ -567,10 +737,39 @@ class Retrieval:
 
         if self.fit_radius and self.obs_type != "emis":
             raise ValueError("fit_radius=True is only supported for emission spectra.")
+        if self.fit_radius:
+            radius_parameters = self._radius_like_sampled_parameters()
+            if radius_parameters:
+                warnings.warn(
+                    "fit_radius=True expects spectra computed at a fixed "
+                    "reference radius, but these sampled parameters look "
+                    "radius-like: "
+                    + ", ".join(radius_parameters)
+                    + ". Remove them from the retrieval parameters or make "
+                    "sure they are not used by the simulator; otherwise "
+                    "FlopPITy will fit an additional radius scale on top of "
+                    "the simulator's radius.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         if not self.fit_radius:
             for attr in ("best_fit_radius_scales", "best_fit_radii"):
                 if hasattr(self, attr):
                     delattr(self, attr)
+
+    def _radius_like_sampled_parameters(self):
+        return [
+            name
+            for name, metadata in self.parameters.items()
+            if not metadata.get("post_processing", False)
+            and self._is_radius_like_parameter_name(name)
+        ]
+
+    @staticmethod
+    def _is_radius_like_parameter_name(name):
+        normalized = str(name).lower().replace("-", "_")
+        parts = [part for part in normalized.split("_") if part]
+        return normalized in {"r", "rad", "radius"} or "radius" in parts
 
     def _configure_pca(self, pca_components=None, n_pca=None, resume=False):
         if n_pca is not None:
@@ -702,6 +901,7 @@ class Retrieval:
         self.thetas = all_thetas
         self.theta_sources = all_sources
         self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+        self._canonicalize_current_thetas()
         self.n_samples = all_thetas.shape[0]
         self.get_x(all_x)
 
@@ -768,6 +968,7 @@ class Retrieval:
         self.get_x(xs)
 
     def _simulate_current_thetas(self, n_threads, simulator_kwargs, sample_offset=0):
+        self._canonicalize_current_thetas()
         self.sim_pars = self._n_simulator_parameters()
         sim_thetas = self.nat_thetas[:, : self.sim_pars]
         simulator_kwargs = dict(simulator_kwargs)
@@ -775,6 +976,12 @@ class Retrieval:
         if n_threads == 1:
             return self.simulator(self.obs, sim_thetas, **simulator_kwargs)
         return self.psimulator(self.obs, sim_thetas, **simulator_kwargs)
+
+    def _canonicalize_current_thetas(self):
+        canonicalize = getattr(self.simulator, "canonicalize_parameters", None)
+        if not callable(canonicalize):
+            return
+        self.thetas, self.nat_thetas = canonicalize(self.thetas, self.nat_thetas)
 
     def _n_simulator_parameters(self):
         return sum(
@@ -862,7 +1069,8 @@ class Retrieval:
                 f"min={np.nanmin(self.best_fit_radii):.4g}, "
                 f"median={np.nanmedian(self.best_fit_radii):.4g}, "
                 f"max={np.nanmax(self.best_fit_radii):.4g} "
-                f"computed in {elapsed:.1f} s"
+                f"computed in {elapsed:.1f} s. "
+                f"Flux scale = (R / {self.radius_reference:g})^2."
             )
 
         for par_idx, key in enumerate(self.parameters):
@@ -1078,6 +1286,33 @@ def _run_single_chunk(args):
     simulator_func, obs, parameters_chunk, thread_idx, kwargs = args
     time.sleep(thread_idx * 0.05)
     return simulator_func(obs, parameters_chunk, thread_idx, **kwargs)
+
+
+def _deserialize_setup_key(key):
+    for caster in (int, float):
+        try:
+            return caster(key)
+        except (TypeError, ValueError):
+            pass
+    if key == "True":
+        return True
+    if key == "False":
+        return False
+    return key
+
+
+class _UnavailableSetupSimulator:
+    """Placeholder used when a setup log references an unavailable simulator."""
+
+    def __init__(self, simulator_name):
+        self.simulator_name = simulator_name
+        self.__name__ = "unavailable_setup_simulator"
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(
+            f"Simulator {self.simulator_name!r} could not be imported. "
+            "Pass simulator=... when rebuilding this setup."
+        )
 
 
 def _sample_mixture(prior, posterior, num_samples, alpha):
