@@ -49,7 +49,7 @@ def simulator(obs, parameters, thread=0, **kwargs):
 
     return spectra
 
-R = Retrieval(simulator, obs_type="trans")
+R = Retrieval(simulator)
 
 R.get_obs(["path/to/observation.txt"])
 
@@ -83,16 +83,28 @@ return {
 }
 ```
 
-## Emission Spectra
+## Retrieval with ARCiS
 
-Use `obs_type="emis"` for emission retrievals:
+FlopPITy comes with an ARCiS wrapper by default that can import the observations and parameters from an ARCiS input file. The workflow would then be:
 
 ```python
-R = Retrieval(simulator, obs_type="emis")
-```
+from floppity import Retrieval
+from floppity.simulators import read_ARCiS_input, ARCiS
 
-Emission retrievals clip non-positive observed and simulated values to avoid
-problems with log-style preprocessing.
+R = Retrieval(ARCiS)
+
+ARCiS_kwargs = dict(
+    input_file = 'path/to/ARCiS/input.txt',
+    output_dir = 'path/to/ARCiS/output',
+)
+
+parameters, observations = read_ARCiS_input(ARCiS_kwargs[input_file])
+
+R.get_obs(observations)
+R.parameters = parameters
+
+R.run(simulator_kwargs=ARCiS_kwargs)
+```
 
 ## Inspecting Results
 
