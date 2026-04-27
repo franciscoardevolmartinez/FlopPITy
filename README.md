@@ -718,6 +718,20 @@ python -m py_compile src/floppity/flappity.py src/floppity/helpers.py
 If imports fail inside `sbi`, check that your `torch`, `pyro`, and `sbi`
 versions are compatible with each other and with the supported Python range.
 
+## Publishing
+
+GitHub releases automatically publish FlopPITy to PyPI through the
+`Publish to PyPI` workflow. The release tag should be a valid version tag such
+as `v0.1.0`; package versions are derived from tags with `setuptools_scm`.
+
+Before the first release, configure PyPI Trusted Publishing for this repository:
+
+- PyPI project: `FlopPITy`
+- Owner: `franciscoardevolmartinez`
+- Repository: `FlopPITy`
+- Workflow: `publish-pypi.yml`
+- Environment: `pypi`
+
 ## Current Limitations
 
 - Python 3.13 is not supported.
