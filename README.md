@@ -19,20 +19,12 @@ FlopPITy supports Python `>=3.10, <3.13`.
 pip install floppity
 ```
 
-For local development:
-
-```bash
-git clone https://github.com/franciscoardevolmartinez/FlopPITy.git
-cd FlopPITy
-pip install -e .
-```
-
 ## Observation Files
 
 Each observation file is a plain text table with at least three columns:
 
 ```text
-wavelength    observed_value    uncertainty
+# wavelength    observed_value    uncertainty
 ```
 
 ## Minimal Retrieval
@@ -64,7 +56,7 @@ R = Retrieval(simulator, obs_type="trans")
 
 R.get_obs(["path/to/observation.txt"])
 
-R.add_parameter("temperature", 500, 2500)
+R.add_parameter("parameter_name", prior_min, prior_max)
 
 R.run()
 ```
