@@ -340,6 +340,9 @@ R.run(
     reuse_prior=None,
     alpha=0,
     pca_components=None,
+    fit_radius=False,
+    radius_bounds=None,
+    radius_reference=1.0,
 )
 ```
 
@@ -366,6 +369,14 @@ Important options:
   latest uninflated posterior proposal.
 - `pca_components`: optional number of PCA components to train on the
   preprocessed spectra before they are passed to the neural density estimator.
+- `fit_radius`: optional analytic radius fitting for emission spectra. When
+  `True`, do not include radius as a sampled parameter; compute each model at
+  `radius_reference` and FlopPITy will scale each simulated spectrum by the
+  best-fitting `(R / radius_reference) ** 2`.
+- `radius_bounds`: optional `(min_radius, max_radius)` bounds for analytic
+  radius fitting.
+- `radius_reference`: reference radius used by the simulator when
+  `fit_radius=True`. The default assumes models are generated at `1.0 Rjup`.
 - `resume`: continue training from an already trained and loaded retrieval.
 
 ### Sampling Methods
@@ -378,6 +389,38 @@ The initial round can be sampled with:
 - `"random"`: samples from the unit-cube prior.
 
 Later rounds always sample from the latest posterior proposal.
+
+### Analytic Radius Fitting
+
+For single-object emission retrievals, radius can be removed from the sampled
+parameter space and fitted analytically for every simulated model:
+
+```python
+R = Retrieval(simulator, obs_type="emis")
+
+# Add temperature, gravity, chemistry, clouds, etc., but not radius.
+R.add_parameter("Teff", 300, 1200)
+R.add_parameter("logg", 3.0, 5.5)
+
+R.run(
+    fit_radius=True,
+    radius_reference=1.0,
+    radius_bounds=(0.7, 1.5),
+)
+```
+
+The simulator should return fluxes computed at `radius_reference`. FlopPITy
+then computes the weighted least-squares flux scale that best matches all
+observations for each model and multiplies the spectra by that scale. Since
+emission flux scales as `R ** 2`, the fitted radius is
+`radius_reference * sqrt(scale)`.
+
+If `save_data=True`, fitted radii are saved in each
+`rounds/round_<NNN>/training_data.npz` file as `fitted_radii`. This option is
+currently a single global scale for the full model spectrum. For binary or
+multi-component retrievals, that is not the same as fitting independent radii
+for each component, because many component-radius combinations can produce the
+same summed spectrum.
 
 ### Flow Options
 

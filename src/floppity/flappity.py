@@ -21,6 +21,8 @@ TRANSIENT_STATE = {
     "nat_thetas",
     "thetas",
     "theta_sources",
+    "best_fit_radius_scales",
+    "best_fit_radii",
     "augmented_x",
     "augmented_thetas",
 }
@@ -321,6 +323,9 @@ class Retrieval:
         alpha=0,
         pca_components=None,
         n_pca=None,
+        fit_radius=False,
+        radius_bounds=None,
+        radius_reference=1.0,
     ):
         """
         Run SNPE-C retrieval rounds.
@@ -336,6 +341,11 @@ class Retrieval:
         simulator_kwargs = {} if simulator_kwargs is None else simulator_kwargs
         n_samples_init = n_samples if n_samples_init is None else n_samples_init
         self._validate_alpha(alpha)
+        self._configure_radius_fit(
+            fit_radius=fit_radius,
+            radius_bounds=radius_bounds,
+            radius_reference=radius_reference,
+        )
         self._configure_pca(
             pca_components=pca_components,
             n_pca=n_pca,
@@ -367,6 +377,9 @@ class Retrieval:
                 "reuse_prior": reuse_prior,
                 "alpha": alpha,
                 "pca_components": self.pca_components,
+                "fit_radius": self.fit_radius,
+                "radius_bounds": self.radius_bounds,
+                "radius_reference": self.radius_reference,
                 "start_round": start_round,
                 "final_round": start_round + n_rounds,
             },
@@ -425,6 +438,9 @@ class Retrieval:
                 "preprocessing": self.preprocessing,
                 "pca_components": getattr(self, "pca_components", None),
                 "pca_fitted": self._pca_is_fitted(),
+                "fit_radius": getattr(self, "fit_radius", False),
+                "radius_bounds": getattr(self, "radius_bounds", None),
+                "radius_reference": getattr(self, "radius_reference", 1.0),
                 "completed_rounds": self.completed_rounds,
                 "error_inflation": getattr(self, "error_inflation", None),
             },
@@ -524,6 +540,36 @@ class Retrieval:
         if alpha < 0 or alpha > 1:
             raise ValueError("alpha must be between 0 and 1.")
 
+    def _configure_radius_fit(
+        self,
+        fit_radius=False,
+        radius_bounds=None,
+        radius_reference=1.0,
+    ):
+        self.fit_radius = bool(fit_radius)
+        self.radius_reference = float(radius_reference)
+        if self.radius_reference <= 0:
+            raise ValueError("radius_reference must be positive.")
+
+        if radius_bounds is None:
+            self.radius_bounds = None
+        else:
+            if len(radius_bounds) != 2:
+                raise ValueError("radius_bounds must be a two-value sequence.")
+            lower, upper = (float(radius_bounds[0]), float(radius_bounds[1]))
+            if lower < 0 or upper <= lower:
+                raise ValueError(
+                    "radius_bounds must satisfy 0 <= lower < upper."
+                )
+            self.radius_bounds = (lower, upper)
+
+        if self.fit_radius and self.obs_type != "emis":
+            raise ValueError("fit_radius=True is only supported for emission spectra.")
+        if not self.fit_radius:
+            for attr in ("best_fit_radius_scales", "best_fit_radii"):
+                if hasattr(self, attr):
+                    delattr(self, attr)
+
     def _configure_pca(self, pca_components=None, n_pca=None, resume=False):
         if n_pca is not None:
             if pca_components is not None and int(pca_components) != int(n_pca):
@@ -585,6 +631,7 @@ class Retrieval:
                 spectra=self.x,
                 sample_sources=getattr(self, "theta_sources", None),
                 processed_spectra=getattr(self, "post_x", None),
+                fitted_radii=getattr(self, "best_fit_radii", None),
             )
 
     def _output_manager(self, output_dir):
@@ -788,6 +835,26 @@ class Retrieval:
         for par_idx, key in enumerate(self.parameters):
             if not self.parameters[key]["post_processing"]:
                 continue
+            if self._is_flux_calibration_parameter(key):
+                continue
+
+            par_values = self.nat_thetas[:, par_idx]
+            postprocessing_function = getattr(postprocessing, key)
+            for obs_key in self.post_x:
+                self.post_x[obs_key] = postprocessing_function(
+                    par_values,
+                    self.obs[obs_key][:, 0],
+                    self.post_x[obs_key],
+                )
+
+        if getattr(self, "fit_radius", False):
+            self._fit_and_apply_radius_scale()
+
+        for par_idx, key in enumerate(self.parameters):
+            if not self.parameters[key]["post_processing"]:
+                continue
+            if not self._is_flux_calibration_parameter(key):
+                continue
 
             par_values = self.nat_thetas[:, par_idx]
             if self._is_observation_specific_parameter(key, "offset"):
@@ -804,14 +871,63 @@ class Retrieval:
                     self.obs[obs_key][:, 0],
                     self.post_x[obs_key],
                 )
-            else:
-                postprocessing_function = getattr(postprocessing, key)
-                for obs_key in self.post_x:
-                    self.post_x[obs_key] = postprocessing_function(
-                        par_values,
-                        self.obs[obs_key][:, 0],
-                        self.post_x[obs_key],
-                    )
+
+    @staticmethod
+    def _is_flux_calibration_parameter(parameter_name):
+        return (
+            Retrieval._is_observation_specific_parameter(parameter_name, "offset")
+            or Retrieval._is_observation_specific_parameter(parameter_name, "scaling")
+        )
+
+    def _fit_and_apply_radius_scale(self):
+        scales = self._best_fit_radius_scales(self.post_x)
+        self.best_fit_radius_scales = scales
+        self.best_fit_radii = self.radius_reference * np.sqrt(scales)
+        for obs_key in self.post_x:
+            self.post_x[obs_key] = self.post_x[obs_key] * scales[:, None]
+
+    def _best_fit_radius_scales(self, spectra):
+        numerator = np.zeros(self.n_samples)
+        denominator = np.zeros(self.n_samples)
+
+        for obs_key, model in spectra.items():
+            obs = self.obs[obs_key]
+            observed = obs[:, 1]
+            uncertainty = obs[:, 2]
+            valid = (
+                np.isfinite(observed)
+                & np.isfinite(uncertainty)
+                & (uncertainty > 0)
+            )
+            if not np.any(valid):
+                continue
+
+            weights = 1.0 / uncertainty[valid] ** 2
+            model_valid = np.asarray(model)[:, valid]
+            finite_model = np.isfinite(model_valid)
+            weighted_model = np.where(finite_model, model_valid, 0.0)
+            numerator += np.sum(
+                weighted_model * observed[valid] * weights,
+                axis=1,
+            )
+            denominator += np.sum(
+                weighted_model * weighted_model * weights,
+                axis=1,
+            )
+
+        scales = np.divide(
+            numerator,
+            denominator,
+            out=np.zeros_like(numerator),
+            where=denominator > 0,
+        )
+        scales = np.clip(scales, 0.0, None)
+        if self.radius_bounds is not None:
+            lower, upper = self.radius_bounds
+            lower_scale = (lower / self.radius_reference) ** 2
+            upper_scale = (upper / self.radius_reference) ** 2
+            scales = np.clip(scales, lower_scale, upper_scale)
+        return scales
 
     @staticmethod
     def _is_observation_specific_parameter(parameter_name, prefix):

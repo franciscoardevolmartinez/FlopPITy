@@ -212,6 +212,74 @@ class TestHelpers(unittest.TestCase):
         with self.assertRaises(KeyError):
             retrieval.do_postprocessing()
 
+    def test_best_fit_radius_scales_emission_spectra(self):
+        retrieval = Retrieval(lambda obs, pars: {}, obs_type="emis")
+        retrieval.obs = {
+            "obs1": np.array([[1.0, 2.0, 0.1], [2.0, 4.0, 0.1]]),
+            "obs2": np.array([[3.0, 6.0, 0.2]]),
+        }
+        retrieval.x = {
+            "obs1": np.array([[1.0, 2.0], [2.0, 2.0]]),
+            "obs2": np.array([[3.0], [2.0]]),
+        }
+        retrieval.n_samples = 2
+        retrieval.parameters = {}
+        retrieval._configure_radius_fit(fit_radius=True, radius_reference=1.0)
+
+        retrieval.do_postprocessing()
+
+        np.testing.assert_allclose(retrieval.best_fit_radius_scales[0], 2.0)
+        np.testing.assert_allclose(retrieval.best_fit_radii[0], np.sqrt(2.0))
+        np.testing.assert_allclose(retrieval.post_x["obs1"][0], np.array([2.0, 4.0]))
+        np.testing.assert_allclose(retrieval.post_x["obs2"][0], np.array([6.0]))
+
+    def test_best_fit_radius_respects_bounds(self):
+        retrieval = Retrieval(lambda obs, pars: {}, obs_type="emis")
+        retrieval.obs = {
+            "obs": np.array([[1.0, 100.0, 1.0]]),
+        }
+        retrieval.x = {"obs": np.array([[1.0]])}
+        retrieval.n_samples = 1
+        retrieval.parameters = {}
+        retrieval._configure_radius_fit(
+            fit_radius=True,
+            radius_bounds=(0.5, 2.0),
+            radius_reference=1.0,
+        )
+
+        retrieval.do_postprocessing()
+
+        np.testing.assert_allclose(retrieval.best_fit_radius_scales, np.array([4.0]))
+        np.testing.assert_allclose(retrieval.best_fit_radii, np.array([2.0]))
+        np.testing.assert_allclose(retrieval.post_x["obs"], np.array([[4.0]]))
+
+    def test_radius_fit_is_emission_only(self):
+        retrieval = Retrieval(lambda obs, pars: {}, obs_type="trans")
+        with self.assertRaises(ValueError):
+            retrieval._configure_radius_fit(fit_radius=True)
+
+    def test_radius_fit_happens_before_flux_offsets(self):
+        retrieval = Retrieval(lambda obs, pars: {}, obs_type="emis")
+        retrieval.obs = {"obs": np.array([[1.0, 5.0, 1.0]])}
+        retrieval.x = {"obs": np.array([[2.0]])}
+        retrieval.n_samples = 1
+        retrieval.nat_thetas = np.array([[1.0]])
+        retrieval.parameters = {
+            "offset:obs": {
+                "min": 0,
+                "max": 2,
+                "log": False,
+                "post_processing": True,
+                "universal": True,
+            },
+        }
+        retrieval._configure_radius_fit(fit_radius=True)
+
+        retrieval.do_postprocessing()
+
+        np.testing.assert_allclose(retrieval.best_fit_radius_scales, np.array([2.5]))
+        np.testing.assert_allclose(retrieval.post_x["obs"], np.array([[6.0]]))
+
     def test_read_ARCiS_input_returns_named_observations(self):
         import tempfile
         import os
@@ -807,6 +875,7 @@ class TestHelpers(unittest.TestCase):
                     2: np.array([[51.0], [61.0]]),
                 },
                 sample_sources=np.array(["prior", "proposal"]),
+                fitted_radii=np.array([1.0, 1.5]),
             )
             loaded = RetrievalOutput.load_round_data(path)
 
@@ -823,6 +892,10 @@ class TestHelpers(unittest.TestCase):
         np.testing.assert_array_equal(
             loaded["sample_sources"],
             np.array(["prior", "proposal"]),
+        )
+        np.testing.assert_array_equal(
+            loaded["fitted_radii"],
+            np.array([1.0, 1.5]),
         )
         np.testing.assert_array_equal(
             loaded["spec"]["obs1"],

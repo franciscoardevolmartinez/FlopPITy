@@ -48,6 +48,7 @@ class RetrievalOutput:
         nat_thetas=None,
         sample_sources=None,
         processed_spectra=None,
+        fitted_radii=None,
     ):
         path = self.round_data_path(round_index)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -66,6 +67,8 @@ class RetrievalOutput:
             arrays["nat_thetas"] = np.asarray(nat_thetas)
         if sample_sources is not None:
             arrays["sample_sources"] = np.asarray(sample_sources, dtype="U")
+        if fitted_radii is not None:
+            arrays["fitted_radii"] = np.asarray(fitted_radii)
 
         for i, (key, value) in enumerate(spectra.items()):
             array_name = f"spectrum_{i}"
@@ -122,6 +125,8 @@ class RetrievalOutput:
                 result["nat_par"] = archive["nat_thetas"]
             if "sample_sources" in archive:
                 result["sample_sources"] = archive["sample_sources"]
+            if "fitted_radii" in archive:
+                result["fitted_radii"] = archive["fitted_radii"]
             return result
 
     @staticmethod
