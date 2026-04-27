@@ -162,10 +162,13 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
             - atmosphere_output (str): Combined atmosphere filename. Defaults
               to mixingratios_round_<round>.dat.
             - log_dir (str): Directory for ARCiS logs. Relative paths are
-              created inside output_dir. Defaults to arcis_logs.
+              created inside arcis_file_dir. Defaults to logs.
             - parameter_grid_dir (str): Directory for ARCiS parameter grid
-              files. Relative paths are created inside output_dir. Defaults to
+              files. Relative paths are created inside arcis_file_dir. Defaults to
               parameter_grids.
+            - arcis_file_dir (str): Directory for ARCiS input copies, logs,
+              parameter grids, and collected atmosphere files. Relative paths
+              are created inside output_dir. Defaults to arcis_files.
 
     Returns
     -------
@@ -187,17 +190,22 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
         'atmosphere_output',
         f'mixingratios_round_{round_index}.dat'
     )
-    log_dir = _arcis_log_dir(output_dir, kwargs.get('log_dir', 'arcis_logs'))
-    parameter_grid_dir = _arcis_output_subdir(
+    arcis_file_dir = _arcis_output_subdir(
         output_dir,
+        kwargs.get('arcis_file_dir', 'arcis_files'),
+    )
+    log_dir = _arcis_output_subdir(arcis_file_dir, kwargs.get('log_dir', 'logs'))
+    parameter_grid_dir = _arcis_output_subdir(
+        arcis_file_dir,
         kwargs.get('parameter_grid_dir', 'parameter_grids'),
     )
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(arcis_file_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(parameter_grid_dir, exist_ok=True)
 
     # Copy and modify input file
-    input_copy = os.path.join(output_dir, os.path.basename(input_file))
+    input_copy = os.path.join(arcis_file_dir, os.path.basename(input_file))
     with open(input_file, 'r') as f:
         lines = f.readlines()
 
@@ -278,7 +286,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
             _append_arcis_atmosphere_structure(
                 model_dir=model_dir,
                 atmosphere_file=atmosphere_file,
-                output_path=os.path.join(output_dir, atmosphere_output),
+                output_path=_arcis_output_subdir(arcis_file_dir, atmosphere_output),
                 round_index=round_index,
                 thread=thread,
                 local_model_index=i,
@@ -292,11 +300,6 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     _remove_arcis_output(output_base)
 
     return spectra
-
-
-def _arcis_log_dir(output_dir, log_dir):
-    """Return the directory where ARCiS subprocess logs should be written."""
-    return _arcis_output_subdir(output_dir, log_dir)
 
 
 def _arcis_output_subdir(output_dir, path):

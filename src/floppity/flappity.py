@@ -538,6 +538,9 @@ class Retrieval:
         self.n_threads = n_threads
         self.alpha = alpha
         self.output = RetrievalOutput(output_dir)
+        self.cloned_observation_paths = self.output.clone_observation_files(
+            getattr(self, "obs_sources", {})
+        )
 
         proposal = self._prepare_run(resume=resume, flow_kwargs=flow_kwargs)
         start_round = self.completed_rounds
@@ -602,6 +605,11 @@ class Retrieval:
             self.posteriors.append(posterior)
             proposal = self._next_proposal(posterior, alpha)
             self.proposals.append(proposal)
+            self._save_posterior_samples(
+                output_dir=output_dir,
+                posterior=posterior,
+                round_index=round_index,
+            )
             self.completed_rounds = round_index + 1
             self.loss_val = self.inference._summary["best_validation_loss"]
             self._checkpoint(output_dir, "retrieval.pkl")
@@ -634,6 +642,8 @@ class Retrieval:
                 "completed_checkpoint": "retrieval.pkl",
                 "pre_round_checkpoint_pattern": "retrieval_pre_round_<N>.pkl",
                 "saved_data_pattern": "rounds/round_<NNN>/training_data.npz",
+                "posterior_samples_pattern": "posterior_samples_round_<N>.txt",
+                "observations_dir": "observations",
             },
         }
 
@@ -642,6 +652,7 @@ class Retrieval:
         for key, obs in getattr(self, "obs", {}).items():
             entry = {
                 "source": getattr(self, "obs_sources", {}).get(key),
+                "cloned_source": getattr(self, "cloned_observation_paths", {}).get(key),
                 "shape": list(obs.shape),
             }
             if obs.size and obs.ndim == 2 and obs.shape[1] >= 3:
@@ -966,9 +977,31 @@ class Retrieval:
             "atmosphere_output",
             f"mixingratios_round_{round_index}.dat",
         )
-        path = os.path.join(simulator_kwargs["output_dir"], filename)
+        path = self._arcis_artifact_path(simulator_kwargs, filename)
         if os.path.exists(path):
             os.remove(path)
+
+    def _save_posterior_samples(self, output_dir, posterior, round_index):
+        samples = posterior.sample((1000,))
+        if isinstance(samples, torch.Tensor):
+            samples = samples.detach().cpu().numpy()
+        samples = np.asarray(samples)
+        natural_samples = helpers.convert_cube(samples, self.parameters)
+        self._output_manager(output_dir).write_posterior_samples(
+            round_index=round_index + 1,
+            samples=natural_samples,
+            parameter_names=self.parameters.keys(),
+        )
+
+    @staticmethod
+    def _arcis_artifact_path(simulator_kwargs, filename):
+        if os.path.isabs(filename):
+            return filename
+        arcis_file_dir = simulator_kwargs.get("arcis_file_dir", "arcis_files")
+        output_dir = simulator_kwargs["output_dir"]
+        if not os.path.isabs(arcis_file_dir):
+            arcis_file_dir = os.path.join(output_dir, arcis_file_dir)
+        return os.path.join(arcis_file_dir, filename)
 
     def _run_simulator(self, n_threads, simulator_kwargs):
         xs = self._simulate_current_thetas(

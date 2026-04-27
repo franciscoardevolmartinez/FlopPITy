@@ -228,15 +228,18 @@ ARCiS wrapper notes:
 - `output_dir` defaults to `"./arcis_outputs"`.
 - `ARCiS_dir` defaults to `"/usr/local/bin/ARCiS"`.
 - `num_threads` sets `OMP_NUM_THREADS` for the ARCiS subprocess.
+- `arcis_file_dir` controls the folder used for ARCiS input copies, logs,
+  parameter-grid files, and collected atmosphere files. Relative paths are
+  created inside the ARCiS `output_dir`; the default is `arcis_files`.
 - `save_atmosphere` defaults to `True`. When enabled, FlopPITy gathers every
   model's `mixingratios.dat` into one file per retrieval round.
 - `atmosphere_file` defaults to `"mixingratios.dat"`.
 - `atmosphere_output` can override the output filename. By default the wrapper
-  writes `mixingratios_round_<round>.dat` in the ARCiS output directory.
+  writes `mixingratios_round_<round>.dat` in `arcis_file_dir`.
 - `log_dir` controls where ARCiS subprocess logs are written. Relative paths
-  are created inside `output_dir`; the default is `arcis_logs`.
+  are created inside `arcis_file_dir`; the default is `logs`.
 - `parameter_grid_dir` controls where ARCiS parameter grid files are written.
-  Relative paths are created inside `output_dir`; the default is
+  Relative paths are created inside `arcis_file_dir`; the default is
   `parameter_grids`.
 - The wrapper forces or adds `makeai=.true.` in a copied input file.
 - Temporary `outputARCiS_*` directories are removed after spectra and
@@ -494,6 +497,10 @@ R = Retrieval.load("retrieval.pkl")
   before training that round. FlopPITy keeps only the latest pre-round
   checkpoint and removes older ones.
 - `retrieval.pkl`: state after each successfully completed training round.
+- `posterior_samples_round_<N>.txt`: 1000 natural-unit samples from the
+  trained posterior after round `N`, with parameter names in the header.
+- `observations/`: copies of the observation files passed to `get_obs`, so the
+  retrieval output contains the data needed to reproduce the setup.
 - `rounds/round_<NNN>/training_data.npz`: optional per-round training arrays
   written when `save_data=True`. These archives store the sampled unit-cube
   parameters, natural parameters when available, raw simulator spectra,

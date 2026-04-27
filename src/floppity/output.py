@@ -1,6 +1,8 @@
 import json
 import os
 import glob
+import shutil
+import warnings
 
 import cloudpickle as pickle
 import numpy as np
@@ -39,6 +41,47 @@ class RetrievalOutput:
 
     def round_data_path(self, round_index):
         return os.path.join(self.round_dir(round_index), "training_data.npz")
+
+    def observations_dir(self):
+        return os.path.join(self.output_dir, "observations")
+
+    def posterior_samples_path(self, round_index):
+        return os.path.join(
+            self.output_dir,
+            f"posterior_samples_round_{round_index}.txt",
+        )
+
+    def clone_observation_files(self, obs_sources):
+        """Copy input observation files into the retrieval output directory."""
+        if not obs_sources:
+            return {}
+
+        cloned = {}
+        os.makedirs(self.observations_dir(), exist_ok=True)
+        used_names = set()
+        for key, source in obs_sources.items():
+            source = os.fspath(source)
+            if not os.path.exists(source):
+                warnings.warn(
+                    f"Observation source {source!r} does not exist and could not "
+                    "be copied into the retrieval output.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+
+            filename = self._observation_copy_name(key, source, used_names)
+            destination = os.path.join(self.observations_dir(), filename)
+            shutil.copy2(source, destination)
+            cloned[key] = destination
+        return cloned
+
+    def write_posterior_samples(self, round_index, samples, parameter_names):
+        """Write posterior samples as a text table."""
+        path = self.posterior_samples_path(round_index)
+        header = " ".join(str(name) for name in parameter_names)
+        np.savetxt(path, np.asarray(samples), header=header)
+        return path
 
     def write_setup_log(self, payload, filename="retrieval_setup.json"):
         path = self.setup_log_path(filename)
@@ -153,6 +196,28 @@ class RetrievalOutput:
             "type": type(key).__name__,
             "value": str(key),
         }
+
+    @classmethod
+    def _observation_copy_name(cls, key, source, used_names):
+        stem = cls._safe_filename_part(key)
+        basename = os.path.basename(source)
+        filename = f"{stem}_{basename}" if stem else basename
+        root, ext = os.path.splitext(filename)
+        candidate = filename
+        index = 2
+        while candidate in used_names:
+            candidate = f"{root}_{index}{ext}"
+            index += 1
+        used_names.add(candidate)
+        return candidate
+
+    @staticmethod
+    def _safe_filename_part(value):
+        text = str(value)
+        return "".join(
+            character if character.isalnum() or character in {"-", "_"} else "_"
+            for character in text
+        ).strip("_")
 
     @staticmethod
     def _deserialize_key(payload):

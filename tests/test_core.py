@@ -43,6 +43,9 @@ class DummyProposal:
     def log_prob(self, theta):
         return torch.zeros(theta.shape[0])
 
+    def set_default_x(self, x):
+        return self
+
 
 def flat_simulator(obs, parameters, thread=0, **kwargs):
     return {
@@ -453,16 +456,19 @@ class TestHelpers(unittest.TestCase):
                     _sample_offset=10,
                 )
 
-            atmosphere_path = os.path.join(tmpdir, "mixingratios_round_7.dat")
+            arcis_file_dir = os.path.join(tmpdir, "arcis_files")
+            atmosphere_path = os.path.join(arcis_file_dir, "mixingratios_round_7.dat")
             with open(atmosphere_path) as file:
                 atmosphere = file.read()
 
             output_base = os.path.join(tmpdir, "outputARCiS_1")
-            log_dir = os.path.join(tmpdir, "arcis_logs")
-            parameter_grid_dir = os.path.join(tmpdir, "parameter_grids")
+            log_dir = os.path.join(arcis_file_dir, "logs")
+            parameter_grid_dir = os.path.join(arcis_file_dir, "parameter_grids")
             output_base_exists = os.path.exists(output_base)
             log_exists = os.path.exists(os.path.join(log_dir, "arcis_run_1_1.log"))
             root_log_exists = os.path.exists(os.path.join(tmpdir, "arcis_run_1_1.log"))
+            input_copy_exists = os.path.exists(os.path.join(arcis_file_dir, "arcis.in"))
+            root_input_copy_exists = os.path.exists(os.path.join(tmpdir, "arcis.in"))
             parameter_grid_exists = os.path.exists(
                 os.path.join(parameter_grid_dir, "parametergridfile_1.dat")
             )
@@ -483,6 +489,8 @@ class TestHelpers(unittest.TestCase):
         self.assertIn("model 1", atmosphere)
         self.assertIn("model 2", atmosphere)
         self.assertFalse(output_base_exists)
+        self.assertTrue(input_copy_exists)
+        self.assertTrue(root_input_copy_exists)
         self.assertTrue(log_exists)
         self.assertFalse(root_log_exists)
         self.assertTrue(parameter_grid_exists)
@@ -782,7 +790,12 @@ class TestHelpers(unittest.TestCase):
         import os
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, "mixingratios_round_2.dat")
+            output_path = os.path.join(
+                tmpdir,
+                "arcis_files",
+                "mixingratios_round_2.dat",
+            )
+            os.makedirs(os.path.dirname(output_path))
             with open(output_path, "w") as file:
                 file.write("old")
 
@@ -1290,11 +1303,45 @@ class TestHelpers(unittest.TestCase):
 
             with open(os.path.join(tmpdir, "retrieval_setup.json")) as file:
                 payload = json.load(file)
+            cloned_obs_path = os.path.join(tmpdir, "observations", "obs1_obs.txt")
+            cloned_obs_exists = os.path.exists(cloned_obs_path)
 
         self.assertEqual(payload["run"]["n_samples"], 2048)
         self.assertEqual(payload["run"]["training_kwargs"]["learning_rate"], 1e-3)
         self.assertEqual(payload["run"]["training_kwargs"]["stop_after_epochs"], 20)
         self.assertEqual(payload["run"]["training_kwargs"]["num_atoms"], 20)
+        self.assertTrue(cloned_obs_exists)
+        self.assertEqual(payload["observations"]["obs1"]["cloned_source"], cloned_obs_path)
+
+    def test_posterior_samples_are_saved_in_natural_units(self):
+        import tempfile
+        import os
+
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.parameters = {
+            "level": {
+                "min": 10,
+                "max": 20,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            retrieval._save_posterior_samples(
+                output_dir=tmpdir,
+                posterior=DummyProposal(0.25),
+                round_index=0,
+            )
+            path = os.path.join(tmpdir, "posterior_samples_round_1.txt")
+            samples = np.loadtxt(path)
+            with open(path) as file:
+                header = file.readline()
+
+        self.assertIn("level", header)
+        self.assertEqual(samples.shape, (1000,))
+        np.testing.assert_allclose(samples, np.full(1000, 12.5))
 
     def test_from_setup_rebuilds_retrieval_and_run_config(self):
         import tempfile

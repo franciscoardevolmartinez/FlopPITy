@@ -122,6 +122,11 @@ R.save("retrieval.pkl")
 R = Retrieval.load("retrieval.pkl")
 ```
 
+`posterior_samples_round_X.txt` stores 1000 posterior samples from each round in
+natural parameter units. If `save_data=True`, `rounds/round_XXX/training_data.npz`
+stores the sampled parameters, simulated spectra, and per-sample metadata used
+for that training round.
+
 ## Next Steps
 
 - Full guide: [docs/detailed_guide.md](docs/detailed_guide.md)
