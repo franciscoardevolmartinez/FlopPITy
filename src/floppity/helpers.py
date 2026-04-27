@@ -1,8 +1,6 @@
 import numpy as np
-# from geomloss import SamplesLoss
 import torch
-from scipy.special import logsumexp
-from sklearn.decomposition import TruncatedSVD
+
 
 def create_obs_file(wvl, spectrum, error, *args):
     """
@@ -86,7 +84,7 @@ def compute_moments(distribution):
     """
     samples = distribution.sample((10000,))
 
-    mean = np.mean(samples)
+    mean = torch.mean(samples)
     variance = distribution.variance
 
     # Skewness and kurtosis require sampling
@@ -142,105 +140,59 @@ def find_MAP(proposal):
                        show_progress_bars=True, force_update=False
                        )
 
-def reduced_chi_squared(obs_dict, sim_dict, n_params=0, batch_size=500000):
-    total_dof = 0
-    total_chi2 = None
+def reduced_chi_squared(obs_dict, sim_dict, n_params=0):
+    """
+    Compute reduced chi-squared values for each simulation vs observation.
 
-    for key, obs_array in obs_dict.items():
+    Parameters
+    ----------
+    obs_dict : dict
+        Keys are observation names. Values are arrays of shape (n_points, ≥3)
+        with columns: wavelength, observed spectrum, error.
+    sim_dict : dict
+        Keys are the same as obs_dict. Values are arrays of shape
+        (n_samples, n_points), corresponding to simulated spectra.
+    n_params : int
+        Number of fitted parameters to subtract from degrees of freedom (default: 0).
+
+    Returns
+    -------
+    chi2_dict : dict
+        Dictionary with same keys, values are arrays of shape (n_samples,)
+        with reduced chi-squared values.
+    """
+
+    chi2_dict = {}
+
+    for key in obs_dict:
+        obs_array = obs_dict[key]
         sims = sim_dict[key]
 
         if obs_array.shape[1] < 3:
-            raise ValueError(f"Observation {key} must have at least 3 columns")
+            raise ValueError(f"Observation {key} must have at least 3 columns (wvl, spectrum, error)")
 
         obs_spectrum = obs_array[:, 1]
         obs_error = obs_array[:, 2]
-        valid = np.isfinite(obs_spectrum) & np.isfinite(obs_error) & (obs_error > 0)
-        obs_spectrum = obs_spectrum[valid]
-        obs_error = np.where(obs_error[valid] <= 1e-12, 1e-12, obs_error[valid])
-        sims = sims[:, valid]
 
-        dof = len(obs_spectrum)
-        total_dof += dof
+        if sims.shape[1] != len(obs_spectrum):
+            raise ValueError(f"Shape mismatch for {key}: sims shape {sims.shape}, obs length {len(obs_spectrum)}")
 
-        n_samples = sims.shape[0]
-        chi2 = np.zeros(n_samples)
+        # Avoid division by zero in error
+        error_safe = np.where(obs_error == 0, 1e-10, obs_error)
 
-        for start in range(0, n_samples, batch_size):
-            end = min(start + batch_size, n_samples)
-            residuals = (sims[start:end] - obs_spectrum) / obs_error
-            chi2[start:end] = np.sum(residuals**2, axis=1)
+        # Compute chi-squared
+        residuals = (sims - obs_spectrum) / error_safe
+        chi2 = np.sum(residuals**2, axis=1)
 
-        total_chi2 = chi2 if total_chi2 is None else total_chi2 + chi2
+        # Degrees of freedom
+        dof = len(obs_spectrum) - n_params
+        if dof <= 0:
+            raise ValueError(f"Non-positive degrees of freedom for {key}: {dof}")
 
-    total_dof -= n_params
-    if total_dof <= 0:
-        raise ValueError(f"Non-positive total degrees of freedom: {total_dof}")
+        chi2_red = chi2 / dof
+        chi2_dict[key] = chi2_red
 
-    return total_chi2 / total_dof
-
-# def W2_distance(proposals, n_mc=100, n_draws=1000):
-    # """
-    # Computes the Wasserstein-2 (W2) distance between the last two 
-    # posteriors to gauge convergence.
-
-    # Parameters:
-    # -----------
-    # proposals : list
-    #     A list of proposal distributions. The last two elements of 
-    #     the list (`proposals[-2]` and `proposals[-1]`) are used to 
-    #     compute the W2 distance.
-    
-    # n_mc : int, optional, default=100
-    #     The number of Monte Carlo estimations of the W2 distance. 
-    #     This controls how many times the W2 distance is computed 
-    #     with different random draws to estimate its mean and error.
-
-    # n_draws : int, optional, default=1000
-    #     The number of samples to draw from each proposal distribution 
-    #     in each Monte Carlo estimation.
-
-    # Returns:
-    # --------
-    # self.w2 : float
-    #     The mean Wasserstein-2 distance computed across all Monte 
-    #     Carlo simulations.
-
-    # self.w2_err : float
-    #     The standard error of the W2 distance, computed from the 
-    #     Monte Carlo simulations.
-
-    # Example:
-    # --------
-    # proposals = [proposal_1, proposal_2]  # Example proposals
-    # w2_dist = some_object.W2_distance(proposals, n_mc=100, n_draws=1000)
-    
-    # print(f"W2 distance: {w2_dist.w2}")
-    # print(f"Standard Error: {w2_dist.w2_err}")
-    
-    # Notes:
-    # ------
-    # - This function uses the `SamplesLoss` class from `geomloss` to compute the 
-    # Sinkhorn approximation of the Wasserstein-2 distance.
-    # - The parameter `blur` in `SamplesLoss` controls the level of regularization 
-    # applied to the Wasserstein distance computation (default is 0.05).
-    # - The function assumes that `proposals` contains at least two proposal distributions, 
-    # and it uses the last two for the comparison (`proposals[-2]` and `proposals[-1]`).
-    # """
-    # loss_fn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05)
-
-    # old_thetas = proposals[-2].sample((n_draws,)).reshape((
-    #     n_draws,-1))
-    # new_thetas = proposals[-1].sample((n_draws,)).reshape((
-    #     n_draws,-1))
-
-    # emd_inter=[]
-    # for i in range(n_mc):
-    #     emd_inter.append(loss_fn(old_thetas, new_thetas)*n_draws)
-
-    # w2=np.mean(emd_inter)
-    # w2_err=np.std(emd_inter)
-
-    # return w2, w2_err
+    return chi2_dict
 
 def find_best_fit(obs_dict, sim_dict):
     """
@@ -267,279 +219,12 @@ def find_best_fit(obs_dict, sim_dict):
         - best_fit_chi2 is the corresponding reduced chi-squared 
           value.
     """
-    chi2 = reduced_chi_squared(obs_dict, sim_dict)
+    chi2_dict = reduced_chi_squared(obs_dict, sim_dict)
     best_fit_dict = {}
 
-    best_fit_index = np.argmin(chi2)
-    best_fit_chi2 = chi2[best_fit_index]
+    for key, chi2_values in chi2_dict.items():
+        best_fit_index = np.argmin(chi2_values)
+        best_fit_chi2 = chi2_values[best_fit_index]
+        best_fit_dict[key] = (best_fit_index, best_fit_chi2)
 
-    return best_fit_index, best_fit_chi2
-
-def likelihood(x_dict, obs_dict):
-    """Calculate the log likelihood of model spectra compared to observations.
-
-    Args:
-        x_dict (dict): Dictionary of simulated spectra (keys are instruments, values are arrays).
-        obs_dict (dict): Dictionary of observed spectra (keys are instruments, values are arrays).
-
-    Returns:
-        np.ndarray: Log likelihood values for each simulated spectrum across all instruments.
-    """
-    log_likelihoods = []
-
-    for key in obs_dict:
-        obs = obs_dict[key]
-        x = x_dict[key]
-
-        if obs.shape[1] < 3:
-            raise ValueError(f"Observation {key} must have at least 3 columns (wavelength, spectrum, error)")
-
-        if x.shape[1] != len(obs[:, 1]):
-            raise ValueError(f"Shape mismatch for {key}: x shape {x.shape}, obs length {len(obs[:, 1])}")
-
-        residual = obs[:, 1] - x
-        log_likelihood = -0.5 * np.sum((residual**2 / obs[:, 2]**2) + np.log(2 * np.pi * obs[:, 2]**2), axis=1)
-        log_likelihoods.append(log_likelihood)
-
-    # Concatenate log likelihoods from all instruments
-    return np.concatenate(log_likelihoods)
-
-def importance_weights(log_likelihoods, log_priors, log_proposal):
-    """Calculate importance weights for a proposal distribution.
-
-    (From Gebhard+25)
-
-    Args:
-        x (np.ndarray): Model spectra.
-        o (np.ndarray): Observed spectra.
-        s (np.ndarray): Errors in the observed spectra.
-        P (np.ndarray): Proposal distribution probabilities.
-
-    Returns:
-        np.ndarray: Importance weights normalized to sum to 1.
-    """
-    # log_likelihoods = likelihood(x,o,s)
-    log_weights = (log_likelihoods + log_priors - log_proposal).detach().numpy()
-    N = len(log_weights)
-    normalized_weights = np.exp(
-        np.log(N) + log_weights - logsumexp(log_weights)
-    )
-    return log_weights, normalized_weights
-
-def eff(weights):    
-    n_eff = float(np.sum(weights) ** 2 / np.sum(weights**2))
-    sampling_efficiency = n_eff / len(weights)
-    return n_eff, sampling_efficiency
-
-def IS_evidence(weights):
-    n = len(weights)
-    n_eff,_ = eff(weights)
-
-    log_evidence = float(logsumexp(weights) - np.log(n))
-    log_evidence_std = float(np.sqrt((n - n_eff) / (n * n_eff)))
-
-    return log_evidence, log_evidence_std
-
-class LogDataTransformer:
-    """
-    Log-transform + standardize data, with Torch tensor support.
-
-    Attributes:
-        eps   : Small constant to avoid log(0).
-        mean  : Mean of log(data) over the batch dimension.
-        std   : Std of log(data) over the batch dimension.
-    """
-
-    def __init__(self, eps=1e-20):
-        self.eps = eps
-        self.mean = None
-        self.std = None
-
-    def fit(self, data):
-        """
-        data: torch.Tensor of shape (batch, features)
-        """
-        clamp_x = torch.clamp(data, min=self.eps)
-        log_flux = torch.log(clamp_x)
-
-        # Compute mean & std over batch dimension
-        self.mean = log_flux.mean(dim=0)
-        self.std = log_flux.std(dim=0)
-
-        # Avoid division-by-zero
-        self.std = torch.clamp(self.std, min=1e-12)
-
-    def transform(self, x):
-        """
-        x: torch.Tensor (..., features)
-        """
-        clamp_x = torch.clamp(x, min=self.eps)
-        log_flux = torch.log(clamp_x)
-        # broadcasting works with any leading dims
-        return (log_flux - self.mean) / self.std
-
-    def inverse_transform(self, x_std):
-        """
-        x_std: standardized tensor (..., features)
-        """
-        log_flux = x_std * self.std + self.mean
-        return torch.exp(log_flux)
-
-    def transform_noise(self, x, noise):
-        """
-        Propagate uncertainties through log + standardization.
-
-        noise: absolute noise in original space
-        x    : flux values in original space
-
-        d(log x)/dx = 1/x
-        so sigma_log = noise / x
-
-        Then dividing by std gives:
-        sigma_std = sigma_log / std
-        """
-        return noise / (x) / self.std
-    
-class DataTransformer:
-    """
-    Standardize data, with Torch tensor support.
-
-    Attributes
-        mean  : Mean of log(data) over the batch dimension.
-        std   : Std of log(data) over the batch dimension.
-    """
-
-    def __init__(self):
-        self.mean = None
-        self.std = None
-
-    def fit(self, data):
-        """
-        data: torch.Tensor of shape (batch, features)
-        """
-        if not isinstance(data, torch.Tensor):
-            data = torch.as_tensor(data, dtype=torch.float32)
-        # Compute mean & std over batch dimension
-        self.mean = data.mean(dim=0)
-        self.std = data.std(dim=0)
-
-        # Avoid division-by-zero
-        # self.std = torch.clamp(self.std, min=1e-20)
-
-    def transform(self, x):
-        """
-        x: torch.Tensor (..., features)
-        """
-        if not isinstance(x, torch.Tensor):
-            x = torch.as_tensor(x, dtype=torch.float32)
-        # broadcasting works with any leading dims
-        return (x - self.mean) / self.std
-
-    def inverse_transform(self, x_std):
-        """
-        x_std: standardized tensor (..., features)
-        """
-        x = x_std * self.std + self.mean
-        return x
-
-    def transform_noise(self, x, noise):
-        """
-        Propagate uncertainties through standardization.
-
-        noise: absolute noise in original space
-        x    : flux values in original space
-        """
-        return noise / self.std
-    
-class pca_wrapper():
-    ''''
-    Wrapper for sklearn's pca to work with the observation dictionaries as inputs.
-    '''
-    def __init__(self, n_pca):
-        self.svd = TruncatedSVD(n_components=n_pca)
-
-    def _dict_to_matrix(self, obs):
-        """
-        Concatenate dictionary spectra into a single matrix.
-        """
-  
-        self.obs_keys = list(obs.keys())
-        self.obs_shapes = {k: obs[k].shape[1] for k in self.obs_keys}
-
-        arrays = [obs[k] for k in self.obs_keys]
-        return np.concatenate(arrays, axis=1)
-
-    def fit(self, obs):
-        X = self._dict_to_matrix(obs)
-        self.svd.fit(X)
-    
-    def transform(self, obs):
-        X = self._dict_to_matrix(obs)
-        return self.svd.transform(X)
-    
-    def inverse_transform(self, components):
-        """
-        Reconstruct spectra and return dictionary with original structure.
-        """
-        X_rec = self.svd.inverse_transform(components)
-
-        out = {}
-        start = 0
-        for k in self.obs_keys:
-            w = self.obs_shapes[k]
-            out[k] = X_rec[:, start:start+w]
-            start += w
-        return out
-    
-    def get_pca(self):
-        return self.svd
-
-class LogitTransformer:
-    """
-    Applies a logit transform to map bounded parameters [a,b] to (-inf, +inf),
-    and provides an inverse transform to go back to natural units.
-
-    Usage:
-        logit_transformer = LogitTransformer(lows, highs)
-        theta_logit = logit_transformer.transform(theta_natural)
-        theta_natural = logit_transformer.inverse_transform(theta_logit)
-    """
-
-    def __init__(self, lows, highs):
-        """
-        Args:
-            lows: torch.Tensor of shape (num_params,) with lower bounds
-            highs: torch.Tensor of shape (num_params,) with upper bounds
-        """
-        self.lows = torch.tensor(lows, dtype=torch.float32)
-        self.highs = torch.tensor(highs, dtype=torch.float32)
-        assert self.lows.shape == self.highs.shape, "Low/high bounds must match shape"
-
-    def transform(self, theta):
-        """
-        Forward logit transform: [a,b] -> (-inf, inf)
-
-        Args:
-            theta: torch.Tensor of shape (..., num_params)
-
-        Returns:
-            torch.Tensor of same shape, logit-transformed
-        """
-        # Ensure theta is broadcastable
-        a = self.lows
-        b = self.highs
-        return torch.log((theta - a) / (b - theta))
-
-    def inverse_transform(self, theta_logit):
-        """
-        Inverse logit transform: (-inf, inf) -> [a,b]
-
-        Args:
-            theta_logit: torch.Tensor of shape (..., num_params)
-
-        Returns:
-            torch.Tensor of same shape, in natural units
-        """
-        a = self.lows
-        b = self.highs
-        return a + (b - a) / (1 + torch.exp(-theta_logit))
+    return best_fit_dict

@@ -1,9 +1,12 @@
 import numpy as np
 import os
+import sys
 import time
 from tqdm import trange, tqdm
 import subprocess
-import importlib
+import fcntl
+import shutil
+from copy import deepcopy
 
 def mock_simulator(obs, pars, thread=0):
     '''
@@ -74,9 +77,9 @@ def read_ARCiS_input(input_path):
             - 'global': bool, currently always False (for global parameter
               flagging)
 
-    obs_list : list of str
-        A list of file paths to the observational datasets specified in the
-        ARCiS input.
+    obs_dict : dict
+        A dictionary of observation names and file paths specified in the
+        ARCiS input. Keys are named like ``obs1``, ``obs2``, and so on.
     """
     with open(input_path, 'rb') as arcis_input:
         lines = arcis_input.readlines()
@@ -126,7 +129,7 @@ def read_ARCiS_input(input_path):
         key = f'obs{obsn}:file'
         if key in line:
             path = line.split('=')[-1].strip().strip('"')
-            obs_dict[f'obs{obsn}']=path
+            obs_dict[f'obs{obsn}'] = path
             obsn += 1
 
     return par_dict, obs_dict
@@ -152,6 +155,17 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
             - output_dir (str): Directory where outputs are written.
             - ARCiS_dir (str): The location where ARCiS is installed.
             If it's not passed, it's assumed to be \'/usr/local/bin/ARCiS\'.
+            - save_atmosphere (bool): If True, append each model's
+              mixingratios.dat to one round-level output file.
+            - atmosphere_file (str): Atmospheric structure file to collect
+              from each ARCiS model directory. Defaults to mixingratios.dat.
+            - atmosphere_output (str): Combined atmosphere filename. Defaults
+              to mixingratios_round_<round>.dat.
+            - log_dir (str): Directory for ARCiS logs. Relative paths are
+              created inside output_dir. Defaults to arcis_logs.
+            - parameter_grid_dir (str): Directory for ARCiS parameter grid
+              files. Relative paths are created inside output_dir. Defaults to
+              parameter_grids.
 
     Returns
     -------
@@ -165,7 +179,22 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     ARCiS = kwargs.get('ARCiS_dir', '/usr/local/bin/ARCiS')
     verbose = kwargs.get('verbose', True)
     num_threads = kwargs.get('num_threads', "4")
+    round_index = kwargs.get('_round_index', 0)
+    sample_offset = kwargs.get('_sample_offset', 0)
+    save_atmosphere = kwargs.get('save_atmosphere', True)
+    atmosphere_file = kwargs.get('atmosphere_file', 'mixingratios.dat')
+    atmosphere_output = kwargs.get(
+        'atmosphere_output',
+        f'mixingratios_round_{round_index}.dat'
+    )
+    log_dir = _arcis_log_dir(output_dir, kwargs.get('log_dir', 'arcis_logs'))
+    parameter_grid_dir = _arcis_output_subdir(
+        output_dir,
+        kwargs.get('parameter_grid_dir', 'parameter_grids'),
+    )
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(parameter_grid_dir, exist_ok=True)
 
     # Copy and modify input file
     input_copy = os.path.join(output_dir, os.path.basename(input_file))
@@ -191,16 +220,15 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
     output_base = os.path.join(output_dir, f'outputARCiS_{thread}')
 
     n_spectra = parameters.shape[0]
-    # obs_indices = sorted(obs.keys())
-    obs_indices = obs.keys()
-    obs_files = [f'obs{idx+1:03d}' for idx in range(len(obs_indices))]
+    obs_indices = list(obs.keys())
+    obs_files = [_arcis_obs_file_name(key) for key in obs_indices]
 
     # Write parameter grid file
-    param_file = os.path.join(output_dir, f'parametergridfile_{thread}.dat')
+    param_file = os.path.join(parameter_grid_dir, f'parametergridfile_{thread}.dat')
     np.savetxt(param_file, parameters)
 
     # Run ARCiS
-    log_files = [f for f in os.listdir(output_dir) if f.startswith(f'arcis_run_{thread}_') and f.endswith('.log')]
+    log_files = [f for f in os.listdir(log_dir) if f.startswith(f'arcis_run_{thread}_') and f.endswith('.log')]
     log_nums = []
     for f in log_files:
         try:
@@ -209,7 +237,7 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
         except ValueError:
             continue
     next_log_num = max(log_nums) + 1 if log_nums else 1
-    log_file = os.path.join(output_dir, f'arcis_run_{thread}_{next_log_num}.log')
+    log_file = os.path.join(log_dir, f'arcis_run_{thread}_{next_log_num}.log')
 
     with open(log_file, 'w') as log:
         try:
@@ -232,11 +260,11 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
 
     # Initialize spectra output
     spectra = {k: [] for k in obs_indices}
-    atmospheres = []
 
     print('Reading ARCiS output...')
     for i in trange(n_spectra):
         model_dir = f'{output_base}/model{i+1:06d}/'
+        global_model_index = sample_offset + i
 
         for k, obs_file in zip(obs_indices, obs_files):
             try:
@@ -244,122 +272,509 @@ def ARCiS(obs, parameters, thread=0, **kwargs):
             except Exception as e:
                 print(f'Warning: Could not read {obs_file} in {model_dir}: {e}')
                 phase = -1 * np.ones_like(obs[k][:, 1])  # fallback
-            try:
-                atmospheres.append(np.loadtxt(os.path.join(model_dir, 'mixingratios.dat')))
-            except Exception as e:
-                print(f'Warning: Could not read "mixingratios.dat" in {model_dir}: {e}')
             spectra[k].append(phase)
 
-    
+        if save_atmosphere:
+            _append_arcis_atmosphere_structure(
+                model_dir=model_dir,
+                atmosphere_file=atmosphere_file,
+                output_path=os.path.join(output_dir, atmosphere_output),
+                round_index=round_index,
+                thread=thread,
+                local_model_index=i,
+                global_model_index=global_model_index,
+                parameters=parameters[i],
+            )
+
     for k in spectra:
         spectra[k] = np.array(spectra[k])  # shape: (n_spectra, n_points)
 
-    atmo_file = os.path.join(output_dir, f'atmosphere_{thread}_{next_log_num}.npy')
-    with open(atmo_file, 'wb') as file:
-        np.save(file, atmospheres)
-
-    #Remove files
-    print('Removing files...')
-    for root, dirs, files in os.walk(output_base, topdown=False):
-        for file in files:
-            os.remove(os.path.join(root, file))
-        for dir in dirs:
-            dir_path = os.path.join(root, dir)
-            for sub_root, sub_dirs, sub_files in os.walk(dir_path, topdown=False):
-                for sub_file in sub_files:
-                    os.remove(os.path.join(sub_root, sub_file))
-                for sub_dir in sub_dirs:
-                    os.rmdir(os.path.join(sub_root, sub_dir))
-            os.rmdir(dir_path)
+    _remove_arcis_output(output_base)
 
     return spectra
 
-### This needs to be made general for any model and any number of objects/atmospheric columns.
+
+def _arcis_log_dir(output_dir, log_dir):
+    """Return the directory where ARCiS subprocess logs should be written."""
+    return _arcis_output_subdir(output_dir, log_dir)
+
+
+def _arcis_output_subdir(output_dir, path):
+    """Return an ARCiS output subdirectory, respecting absolute paths."""
+    if os.path.isabs(path):
+        return path
+    return os.path.join(output_dir, path)
+
+
+def _remove_arcis_output(output_base):
+    """Remove an ARCiS output tree with visible progress."""
+    if not os.path.exists(output_base):
+        return
+
+    print(f"Removing temporary ARCiS output: {output_base}")
+    paths = []
+    for root, dirs, files in os.walk(output_base, topdown=False):
+        paths.extend(os.path.join(root, file) for file in files)
+        paths.extend(os.path.join(root, directory) for directory in dirs)
+
+    for path in tqdm(
+        paths,
+        desc="Cleaning ARCiS output",
+        unit="path",
+        file=sys.stdout,
+    ):
+        try:
+            if os.path.isdir(path):
+                os.rmdir(path)
+            else:
+                os.remove(path)
+        except FileNotFoundError:
+            continue
+
+    try:
+        os.rmdir(output_base)
+    except OSError:
+        shutil.rmtree(output_base, ignore_errors=True)
+
+
+def ARCiS_binary(obs, parameters, thread=0, **kwargs):
+    """Run a two-component ARCiS model and sum the component spectra."""
+    kwargs = dict(kwargs)
+    kwargs["n_components"] = 2
+    return ARCiS_multiple(obs, parameters, thread=thread, **kwargs)
+
+
 def ARCiS_multiple(obs, parameters, thread=0, **kwargs):
+    """Run and sum multiple ARCiS components.
+
+    Parameters are expected to be stacked component-by-component. For a binary
+    retrieval with ``m`` parameters per object, the first ``m`` columns belong
+    to component 1 and the next ``m`` columns belong to component 2.
     """
-    Generalized ARCiS multi-component model (binary, triple, ...).
+    n_components = int(kwargs.get("n_components", 2))
+    if n_components <= 0:
+        raise ValueError("n_components must be a positive integer.")
 
-    Automatically sorts components per row so that the first parameter
-    of component 1 >= component 2 >= component 3 ... etc.
+    parameters = np.asarray(parameters)
+    if parameters.ndim != 2:
+        raise ValueError("parameters must be a 2D array.")
 
-    Args
-    ----
-    obs : dict
-        Observational data.
-    parameters : ndarray (N_samples, N_params_total)
-        Parameters for all components stacked horizontally.
-    thread : int
-        Thread number for parallel execution.
-    kwargs :
-        - n_components : int
-        - anything else passed to ARCiS()
-
-    Returns
-    -------
-    combined : dict
-        Combined multi-component spectra.
-    """
-
-    n_components = kwargs.get("n_components", 2)
-    N_samples, N_total_params = parameters.shape
-
-    # if N_total_params % n_components != 0:
-    #     raise ValueError(
-    #         f"Parameter count {N_total_params} not divisible by n_components={n_components}"
-    #     )
-
-    nparams = N_total_params // n_components
-
-    # ----------------------------------------------------------
-    # 1) RESHAPE: (N_samples, n_components, nparams)
-    # ----------------------------------------------------------
-    # params_3d = parameters.reshape(N_samples, n_components, nparams)
-
-    # ----------------------------------------------------------
-    # 2) SORT blocks per row by first parameter DESCENDING
-    # ----------------------------------------------------------
-    # Sorting key = params_3d[:, :, 0]  (shape = N_samples x n_components)
-    # sort_idx = np.argsort(-params_3d[:, :, 0], axis=1)  
-
-    # Gather sorted parameters
-    # row_indices = np.arange(N_samples)[:, None]
-    # params_sorted = params_3d[row_indices, sort_idx]
-
-    # ----------------------------------------------------------
-    # 3) Flatten back to original shape
-    # ----------------------------------------------------------
-    # parameters_sorted = params_sorted.reshape(N_samples, N_total_params)
-
-    # ----------------------------------------------------------
-    # 4) Evaluate ARCiS for each component
-    # ----------------------------------------------------------
-    objects = {}
-
-    for i in range(n_components):
-        print(f"Computing models for component {i+1} (sorted block)")
-
-        component_params = parameters[:, i*nparams:(i+1)*nparams]
-
-        objects[i] = ARCiS(
-            obs,
-            component_params,
-            thread=thread,
-            **kwargs
+    n_samples, n_total_params = parameters.shape
+    if n_total_params % n_components != 0:
+        raise ValueError(
+            f"Parameter count {n_total_params} is not divisible by "
+            f"n_components={n_components}."
         )
 
-    # ----------------------------------------------------------
-    # 5) Combine fluxes linearly
-    # ----------------------------------------------------------
-    combined = {}
-    first_key = list(objects[0].keys())[0]
+    n_component_params = n_total_params // n_components
+    component_blocks = parameters.reshape(n_samples, n_components, n_component_params)
+    component_order = np.argsort(-component_blocks[:, :, 0], axis=1)
+    component_blocks = np.take_along_axis(
+        component_blocks,
+        component_order[:, :, None],
+        axis=1,
+    )
+    combined = None
 
-    for k in objects[0]:
-        combined[k] = sum(objects[i][k] for i in range(n_components))
+    for component_index in range(n_components):
+        print(f"Computing ARCiS component {component_index + 1}/{n_components}")
+        component_parameters = component_blocks[:, component_index, :]
+
+        component_kwargs = dict(kwargs)
+        component_thread = f"{thread}_component{component_index + 1}"
+        component_spectra = ARCiS(
+            obs,
+            component_parameters,
+            thread=component_thread,
+            **component_kwargs,
+        )
+
+        if combined is None:
+            combined = {
+                key: np.array(value, copy=True)
+                for key, value in component_spectra.items()
+            }
+        else:
+            for key, value in component_spectra.items():
+                combined[key] += value
 
     return combined
 
-def check_ARCiS_status(proc, output_dir, n_models, thread):
 
+class MultiComponentSimulator:
+    """Wrap any FlopPITy simulator as a multi-component simulator."""
+
+    def __init__(
+        self,
+        simulator,
+        parameter_names,
+        n_components=2,
+        shared_parameters=None,
+        combine="sum",
+        component_weights=None,
+        weight_parameter_names=None,
+        normalize_weights=True,
+    ):
+        self.simulator = simulator
+        self.parameter_names = list(parameter_names)
+        self.n_components = int(n_components)
+        self.shared_parameters = set(shared_parameters or [])
+        self.combine = combine
+        self.component_weights = component_weights
+        self.weight_parameter_names = list(weight_parameter_names or [])
+        self.normalize_weights = normalize_weights
+        self.__name__ = f"{_callable_name(simulator)}_multi_component"
+        self.sort_parameter_name = self._sort_parameter_name()
+        if self.combine == "sum" and (
+            self.component_weights is not None or self.weight_parameter_names
+        ):
+            self.combine = "weighted_sum"
+
+        if self.n_components <= 0:
+            raise ValueError("n_components must be a positive integer.")
+        missing = self.shared_parameters.difference(self.parameter_names)
+        if missing:
+            raise ValueError(
+                "shared_parameters contains names that are not in parameter_names: "
+                + ", ".join(str(name) for name in sorted(missing, key=str))
+            )
+        if self.combine not in {"sum", "weighted_sum"}:
+            raise ValueError("combine must be either 'sum' or 'weighted_sum'.")
+        if self.component_weights is not None and self.weight_parameter_names:
+            raise ValueError(
+                "Use either component_weights or weight_parameters, not both."
+            )
+        if self.component_weights is not None:
+            self.component_weights = np.asarray(self.component_weights, dtype=float)
+            if self.component_weights.shape != (self.n_components,):
+                raise ValueError(
+                    "component_weights must have one value per component."
+                )
+        if (
+            self.weight_parameter_names
+            and len(self.weight_parameter_names) not in {1, self.n_components}
+        ):
+            raise ValueError(
+                "weight_parameters must contain either one binary fraction "
+                "parameter or one weight parameter per component."
+            )
+        if len(self.weight_parameter_names) == 1 and self.n_components != 2:
+            raise ValueError(
+                "A single weight parameter is only defined for two components."
+            )
+
+        self.input_parameter_names = self._input_parameter_names()
+        self._input_index = {
+            name: index for index, name in enumerate(self.input_parameter_names)
+        }
+
+    def __call__(self, obs, parameters, thread=0, **kwargs):
+        parameters = np.asarray(parameters)
+        if parameters.ndim != 2:
+            raise ValueError("parameters must be a 2D array.")
+        if parameters.shape[1] != len(self.input_parameter_names):
+            raise ValueError(
+                f"Expected {len(self.input_parameter_names)} parameters for "
+                f"multi-component simulator, got {parameters.shape[1]}."
+            )
+
+        combined = None
+        weights = self._component_weights(parameters)
+        component_order = self._component_order(parameters)
+        weights = np.take_along_axis(weights, component_order, axis=1)
+        for component_index in range(self.n_components):
+            component_parameters = self._component_parameters(
+                parameters,
+                component_index,
+                component_order,
+            )
+            component_spectra = self.simulator(
+                obs,
+                component_parameters,
+                thread=f"{thread}_component{component_index + 1}",
+                **kwargs,
+            )
+
+            if combined is None:
+                combined = {
+                    key: self._weighted_spectra(value, weights[:, component_index])
+                    for key, value in component_spectra.items()
+                }
+            else:
+                for key, value in component_spectra.items():
+                    combined[key] += self._weighted_spectra(
+                        value,
+                        weights[:, component_index],
+                    )
+        return combined
+
+    def _input_parameter_names(self):
+        names = []
+        for name in self.parameter_names:
+            if name in self.shared_parameters:
+                names.append(name)
+            else:
+                names.extend(
+                    _component_parameter_name(name, component_index)
+                    for component_index in range(1, self.n_components + 1)
+                )
+        names.extend(self.weight_parameter_names)
+        return names
+
+    def _component_parameters(self, parameters, component_index, component_order):
+        all_parameters = np.empty(
+            (parameters.shape[0], self.n_components, len(self.parameter_names)),
+            dtype=parameters.dtype,
+        )
+        for original_component_index in range(self.n_components):
+            component_number = original_component_index + 1
+            for output_index, name in enumerate(self.parameter_names):
+                if name in self.shared_parameters:
+                    input_name = name
+                else:
+                    input_name = _component_parameter_name(name, component_number)
+                all_parameters[:, original_component_index, output_index] = parameters[
+                    :,
+                    self._input_index[input_name],
+                ]
+
+        sorted_parameters = np.take_along_axis(
+            all_parameters,
+            component_order[:, :, None],
+            axis=1,
+        )
+        return sorted_parameters[:, component_index, :]
+
+    def canonicalize_parameters(self, unit_parameters, natural_parameters):
+        """Sort component-labelled parameters into the simulator's component order."""
+        natural_parameters = np.asarray(natural_parameters)
+        unit_parameters = np.asarray(unit_parameters)
+        component_order = self._component_order(natural_parameters)
+        if np.all(component_order == np.arange(self.n_components)):
+            return unit_parameters, natural_parameters
+
+        return (
+            self._canonicalize_parameter_array(unit_parameters, component_order),
+            self._canonicalize_parameter_array(natural_parameters, component_order),
+        )
+
+    def _canonicalize_parameter_array(self, parameters, component_order):
+        sorted_parameters = np.array(parameters, copy=True)
+        for name in self.parameter_names:
+            if name in self.shared_parameters:
+                continue
+            component_indices = [
+                self._input_index[_component_parameter_name(name, component_number)]
+                for component_number in range(1, self.n_components + 1)
+            ]
+            values = parameters[:, component_indices]
+            sorted_parameters[:, component_indices] = np.take_along_axis(
+                values,
+                component_order,
+                axis=1,
+            )
+
+        if len(self.weight_parameter_names) == self.n_components:
+            weight_indices = [
+                self._input_index[name]
+                for name in self.weight_parameter_names
+            ]
+            values = parameters[:, weight_indices]
+            sorted_parameters[:, weight_indices] = np.take_along_axis(
+                values,
+                component_order,
+                axis=1,
+            )
+        elif len(self.weight_parameter_names) == 1 and self.n_components == 2:
+            weight_index = self._input_index[self.weight_parameter_names[0]]
+            swapped = component_order[:, 0] == 1
+            sorted_parameters[swapped, weight_index] = (
+                1 - sorted_parameters[swapped, weight_index]
+            )
+
+        return sorted_parameters
+
+    def _sort_parameter_name(self):
+        for name in self.parameter_names:
+            if name not in self.shared_parameters:
+                return name
+        return None
+
+    def _component_order(self, parameters):
+        if self.sort_parameter_name is None:
+            return np.repeat(
+                np.arange(self.n_components).reshape(1, -1),
+                parameters.shape[0],
+                axis=0,
+            )
+
+        values = np.column_stack([
+            parameters[
+                :,
+                self._input_index[
+                    _component_parameter_name(self.sort_parameter_name, component)
+                ],
+            ]
+            for component in range(1, self.n_components + 1)
+        ])
+        return np.argsort(-values, axis=1)
+
+    def _component_weights(self, parameters):
+        if self.combine == "sum":
+            return np.ones((parameters.shape[0], self.n_components))
+
+        if self.component_weights is not None:
+            weights = np.repeat(
+                self.component_weights.reshape(1, -1),
+                parameters.shape[0],
+                axis=0,
+            )
+        elif len(self.weight_parameter_names) == 1:
+            fraction = parameters[:, self._input_index[self.weight_parameter_names[0]]]
+            weights = np.column_stack([fraction, 1 - fraction])
+        elif len(self.weight_parameter_names) == self.n_components:
+            weights = np.column_stack([
+                parameters[:, self._input_index[name]]
+                for name in self.weight_parameter_names
+            ])
+        else:
+            raise ValueError(
+                "combine='weighted_sum' requires component_weights or "
+                "weight_parameters."
+            )
+
+        if self.normalize_weights:
+            weight_sum = np.sum(weights, axis=1, keepdims=True)
+            if np.any(weight_sum == 0):
+                raise ValueError("Component weights cannot sum to zero.")
+            weights = weights / weight_sum
+        return weights
+
+    @staticmethod
+    def _weighted_spectra(spectra, weights):
+        return np.asarray(spectra) * weights[:, None]
+
+
+def make_multi_component_simulator(
+    simulator,
+    base_parameters,
+    n_components=2,
+    shared_parameters=None,
+    combine="sum",
+    component_weights=None,
+    weight_parameters=None,
+    normalize_weights=True,
+):
+    """Create a multi-component simulator and matching parameter dictionary."""
+    parameter_names = list(base_parameters.keys())
+    normalized_weight_parameters = _normalize_weight_parameters(weight_parameters)
+    if combine == "sum" and (
+        component_weights is not None or normalized_weight_parameters
+    ):
+        combine = "weighted_sum"
+    wrapped_simulator = MultiComponentSimulator(
+        simulator=simulator,
+        parameter_names=parameter_names,
+        n_components=n_components,
+        shared_parameters=shared_parameters,
+        combine=combine,
+        component_weights=component_weights,
+        weight_parameter_names=normalized_weight_parameters.keys(),
+        normalize_weights=normalize_weights,
+    )
+    parameters = make_multi_component_parameters(
+        base_parameters,
+        n_components=n_components,
+        shared_parameters=shared_parameters,
+        weight_parameters=normalized_weight_parameters,
+    )
+    return wrapped_simulator, parameters
+
+
+def make_multi_component_parameters(
+    base_parameters,
+    n_components=2,
+    shared_parameters=None,
+    weight_parameters=None,
+):
+    """Build a reduced multi-component parameter dictionary."""
+    n_components = int(n_components)
+    if n_components <= 0:
+        raise ValueError("n_components must be a positive integer.")
+
+    shared_parameters = set(shared_parameters or [])
+    parameter_names = list(base_parameters.keys())
+    missing = shared_parameters.difference(parameter_names)
+    if missing:
+        raise ValueError(
+            "shared_parameters contains names that are not in base_parameters: "
+            + ", ".join(str(name) for name in sorted(missing, key=str))
+        )
+
+    parameters = {}
+    for name, metadata in base_parameters.items():
+        if name in shared_parameters:
+            parameters[name] = deepcopy(metadata)
+        else:
+            for component_index in range(1, n_components + 1):
+                parameters[_component_parameter_name(name, component_index)] = deepcopy(
+                    metadata
+                )
+    parameters.update(_normalize_weight_parameters(weight_parameters))
+    return parameters
+
+
+def make_binary_simulator(
+    simulator,
+    base_parameters,
+    shared_parameters=None,
+    combine="sum",
+    component_weights=None,
+    weight_parameters=None,
+    normalize_weights=True,
+):
+    """Create a two-component simulator and matching parameter dictionary."""
+    return make_multi_component_simulator(
+        simulator=simulator,
+        base_parameters=base_parameters,
+        n_components=2,
+        shared_parameters=shared_parameters,
+        combine=combine,
+        component_weights=component_weights,
+        weight_parameters=weight_parameters,
+        normalize_weights=normalize_weights,
+    )
+
+
+def _component_parameter_name(name, component_index):
+    return f"{name}_{component_index}"
+
+
+def _callable_name(value):
+    return getattr(value, "__name__", value.__class__.__name__)
+
+
+def _normalize_weight_parameters(weight_parameters):
+    if weight_parameters is None:
+        return {}
+    if isinstance(weight_parameters, str):
+        weight_parameters = {weight_parameters: (0, 1)}
+
+    normalized = {}
+    for name, metadata in weight_parameters.items():
+        if isinstance(metadata, dict):
+            item = deepcopy(metadata)
+        else:
+            min_value, max_value = metadata
+            item = {"min": min_value, "max": max_value}
+        item.setdefault("log", False)
+        item.setdefault("post_processing", False)
+        item.setdefault("universal", True)
+        normalized[name] = item
+    return normalized
+
+
+def check_ARCiS_status(proc, output_dir, n_models, thread):
     """
     Monitor the progress of a Fortran process generating models.
 
@@ -398,127 +813,85 @@ def check_ARCiS_status(proc, output_dir, n_models, thread):
         proc.wait()
         progress.close()
 
-def PICASO(obs, parameters, thread=0, **kwargs):
+def _arcis_obs_file_name(obs_key):
+    """Convert a FlopPITy observation key to an ARCiS output filename."""
+    if isinstance(obs_key, int):
+        return f'obs{obs_key + 1:03d}'
 
-    try:
-        tomllib = importlib.import_module('tomllib')
-    except ImportError:
-        raise ImportError(
-            f"Package tomllib not found. "
-            f"Please install it separately."
-        )
-    try:
-        toml = importlib.import_module('toml')
-    except ImportError:
-        raise ImportError(
-            f"Package toml not found. "
-            f"Please install it separately."
-        )
-    
-    try:
-        picaso = importlib.import_module('picaso')
-    except ImportError:
-        raise ImportError(
-            f"Picaso not found. "
-            f"Please install it separately."
-        )
+    obs_key = str(obs_key)
+    if obs_key.startswith('obs') and obs_key[3:].isdigit():
+        return f'obs{int(obs_key[3:]):03d}'
 
-    config_f=kwargs.get('config_file', None)
-    assert config_f is not None, "Config file can not be None!"
+    return obs_key
 
-    with open(config_f, "rb") as f:
-            config = tomllib.load(f)
+def _append_arcis_atmosphere_structure(
+    model_dir,
+    atmosphere_file,
+    output_path,
+    round_index,
+    thread,
+    local_model_index,
+    global_model_index,
+    parameters,
+):
+    source_path = os.path.join(model_dir, atmosphere_file)
+    if not os.path.exists(source_path):
+        print(f'Warning: Could not find {atmosphere_file} in {model_dir}')
+        return
 
-    os.makedirs(config['InputOutput']['retrieval_output'], exist_ok=True)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(source_path, 'r') as source:
+        contents = source.read().rstrip()
 
-    output_file_name = config['InputOutput']['retrieval_output']+"/inputs.toml"
-    with open(output_file_name, "w") as toml_file:
-        toml.dump(config, toml_file)
+    columns = _arcis_atmosphere_columns(contents)
+    contents = _arcis_atmosphere_numeric_contents(contents)
+    parameter_text = ' '.join(f'{value:.17g}' for value in np.asarray(parameters))
+    with open(output_path, 'a') as destination:
+        fcntl.flock(destination, fcntl.LOCK_EX)
+        try:
+            if columns:
+                destination.write(f'# columns={" ".join(columns)}\n')
+            destination.write(
+                f'# round={round_index} '
+                f'global_model={global_model_index} '
+                f'thread={thread} '
+                f'local_model={local_model_index} '
+                f'parameters={parameter_text}\n'
+            )
+            destination.write(contents)
+            destination.write('\n\n')
+        finally:
+            fcntl.flock(destination, fcntl.LOCK_UN)
 
-    OPA = picaso.justdoit.opannection(
-        filename_db=config['OpticalProperties']['opacity_files'], #database(s)
-        method=config['OpticalProperties']['opacity_method'], #resampled, preweighted, resortrebin
-        **config['OpticalProperties']['opacity_kwargs'] #additonal inputs 
-        )
 
-    prior_config=config['retrieval']
-    
-    fitpars=picaso.driver.prior_finder(prior_config)
-    ndims=len(fitpars)
+def _arcis_atmosphere_columns(contents):
+    for line in contents.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
 
-    preload_cloud_miefs = picaso.driver.find_values_for_key(config ,'condensate')
-    virga_mieff   = config['OpticalProperties'].get('virga_mieff',None)
-    param_tools = picaso.parameterizations.Parameterize(load_cld_optical=preload_cloud_miefs,
-                                    mieff_dir=virga_mieff)
-    
-    for i,key in enumerate(fitpars.keys()):
-        if fitpars[key]['log']:
-            parameters[:,i] = 10**parameters[:,i]
-    
-    DATA_DICT = picaso.driver.get_data(config)
-    x = picaso.driver.MODEL(parameters, fitpars, config, OPA, param_tools, DATA_DICT)
+        candidate = stripped.lstrip('#').strip()
+        tokens = [
+            token
+            for token in candidate.split()
+            if not (token.startswith('[') and token.endswith(']'))
+        ]
+        if len(tokens) >= 2 and any(char.isalpha() for char in ''.join(tokens)):
+            return tokens
+    return []
 
-    return x
 
-def read_PICASO_config(config_file):
-
-    #load necessary packages
-    try:
-        tomllib = importlib.import_module('tomllib')
-    except ImportError:
-        raise ImportError(
-            f"Package toml not found. "
-            f"Please install it separately."
-        )
-    
-    try:
-        picaso = importlib.import_module('picaso')
-    except ImportError:
-        raise ImportError(
-            f"Picaso not found. "
-            f"Please install it separately."
-        )
-    
-    try:
-        xarray = importlib.import_module('xarray')
-    except ImportError:
-        raise ImportError(
-            f"Package xarray not found. "
-            f"Please install it separately."
-        )
-
-    # Get fitted parameters and priors
-    with open(config_file, "rb") as f:
-        config = tomllib.load(f)
-    prior_config=config['retrieval']
-    fitpars=picaso.driver.prior_finder(prior_config)
-    par_dict={}
-
-    for i,key in enumerate(fitpars.keys()):
-        if fitpars[key]['prior'] == 'uniform':
-            minn=fitpars[key]['uniform_kwargs']['min']
-            maxx=fitpars[key]['uniform_kwargs']['max']
-            
-            if fitpars[key]['log']:
-                # minn=10**minn
-                # maxx=10**maxx
-                log_flag=True
-            else:
-                log_flag=False
-
-        par_dict[key] = {
-                'min': minn,
-                'max': maxx,
-                'log': log_flag,
-                'post_processing': False,
-                'universal': False
-            }
-        
-    # Read observations
-    data_dict = picaso.driver.get_data(config)
-
-    obs_dict={}
-    for key in data_dict:
-        obs_dict[key] = np.column_stack(data_dict[key])
-        
-    return par_dict, obs_dict
+def _arcis_atmosphere_numeric_contents(contents):
+    numeric_lines = []
+    for line in contents.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith('#'):
+            continue
+        try:
+            float(stripped.split()[0])
+        except (ValueError, IndexError):
+            continue
+        numeric_lines.append(line)
+    return '\n'.join(numeric_lines)
