@@ -3,6 +3,7 @@ from unittest.mock import patch
 from contextlib import redirect_stdout
 from io import StringIO
 import json
+import inspect
 import numpy as np
 import torch
 from torch.distributions import Normal
@@ -91,6 +92,22 @@ class TestHelpers(unittest.TestCase):
         proposal = MockProposal()
         result = find_MAP(proposal)
         self.assertEqual(result, "MAP result")
+
+    def test_retrieval_defaults_match_quickstart_settings(self):
+        retrieval = Retrieval(lambda obs, pars: {})
+        self.assertEqual(retrieval.obs_type, "emis")
+
+        run_signature = inspect.signature(Retrieval.run)
+        self.assertEqual(run_signature.parameters["n_samples"].default, 2048)
+        self.assertEqual(run_signature.parameters["n_rounds"].default, 5)
+
+        density_signature = inspect.signature(Retrieval.density_builder)
+        self.assertEqual(density_signature.parameters["flow"].default, "nsf")
+        self.assertEqual(density_signature.parameters["bins"].default, 5)
+        self.assertEqual(density_signature.parameters["transforms"].default, 8)
+        self.assertEqual(density_signature.parameters["blocks"].default, 2)
+        self.assertEqual(density_signature.parameters["hidden"].default, 64)
+        self.assertEqual(density_signature.parameters["dropout"].default, 0.05)
 
     def test_reduced_chi_squared(self):
         obs_dict = {
@@ -1251,6 +1268,33 @@ class TestHelpers(unittest.TestCase):
             "test_core.flat_simulator",
         )
         self.assertEqual(payload["outputs"]["completed_checkpoint"], "retrieval.pkl")
+
+    def test_run_logs_default_sample_and_training_settings(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            obs_path = os.path.join(tmpdir, "obs.txt")
+            np.savetxt(obs_path, np.array([[1.0, 10.0, 0.1]]))
+
+            retrieval = Retrieval(flat_simulator)
+            retrieval.get_obs({"obs1": obs_path})
+            retrieval.add_parameter("level", 0.0, 1.0)
+            with patch.object(retrieval, "create_prior") as create_prior, patch.object(
+                retrieval, "density_builder"
+            ):
+                create_prior.side_effect = lambda: setattr(
+                    retrieval, "prior", DummyProposal(0.1)
+                )
+                retrieval.run(n_rounds=0, output_dir=tmpdir)
+
+            with open(os.path.join(tmpdir, "retrieval_setup.json")) as file:
+                payload = json.load(file)
+
+        self.assertEqual(payload["run"]["n_samples"], 2048)
+        self.assertEqual(payload["run"]["training_kwargs"]["learning_rate"], 1e-3)
+        self.assertEqual(payload["run"]["training_kwargs"]["stop_after_epochs"], 20)
+        self.assertEqual(payload["run"]["training_kwargs"]["num_atoms"], 20)
 
     def test_from_setup_rebuilds_retrieval_and_run_config(self):
         import tempfile

@@ -91,13 +91,13 @@ offsets and scaling factors.
 Create a retrieval with:
 
 ```python
-R = Retrieval(simulator, obs_type="trans")
+R = Retrieval(simulator)
 ```
 
 `obs_type` can be:
 
-- `"trans"` for transmission spectra
-- `"emis"` for emission spectra
+- `"emis"` for emission spectra. This is the default.
+- `"trans"` for transmission spectra.
 
 For emission retrievals, non-positive observed and simulated values are clipped
 to `1e-12` before log-style preprocessing can encounter them.
@@ -334,10 +334,10 @@ The main entrypoint is:
 ```python
 R.run(
     n_threads=1,
-    n_samples=100,
+    n_samples=2048,
     n_samples_init=None,
     resume=False,
-    n_rounds=10,
+    n_rounds=5,
     n_aug=1,
     flow_kwargs=None,
     training_kwargs=None,
@@ -442,10 +442,10 @@ same summed spectrum.
 ```python
 flow_kwargs = {
     "flow": "nsf",
-    "transforms": 10,
-    "hidden": 50,
-    "blocks": 3,
-    "bins": 8,
+    "transforms": 8,
+    "hidden": 64,
+    "blocks": 2,
+    "bins": 5,
     "dropout": 0.05,
     "z_score_theta": "independent",
     "z_score_x": "independent",
@@ -462,6 +462,7 @@ training_kwargs = {
     "max_num_epochs": 100,
     "stop_after_epochs": 20,
     "learning_rate": 1e-3,
+    "num_atoms": 20,
     "training_batch_size": 128,
 }
 ```

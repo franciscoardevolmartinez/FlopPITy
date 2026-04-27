@@ -37,7 +37,7 @@ TRANSIENT_STATE = {
 class Retrieval:
     """Simulation-based atmospheric retrieval driver."""
 
-    def __init__(self, simulator, obs_type, pca_components=None, do_pca=False):
+    def __init__(self, simulator, obs_type="emis", pca_components=None, do_pca=False):
         """
         Parameters
         ----------
@@ -45,8 +45,9 @@ class Retrieval:
             Function that accepts ``obs`` and an array of natural parameters
             with shape ``(n_samples, n_dims)`` and returns simulated spectra
             keyed like ``obs``.
-        obs_type : str
+        obs_type : str, optional
             Observation type, either ``"emis"`` or ``"trans"``.
+            Defaults to ``"emis"``.
         pca_components : int, optional
             Number of PCA components to train on preprocessed spectra. PCA is
             disabled when omitted.
@@ -108,7 +109,7 @@ class Retrieval:
         simulator = simulator or cls._import_setup_simulator(setup)
         retrieval = cls(
             simulator,
-            obs_type=setup.get("retrieval", {}).get("obs_type"),
+            obs_type=setup.get("retrieval", {}).get("obs_type") or "emis",
             pca_components=setup.get("retrieval", {}).get("pca_components"),
         )
         retrieval.setup_payload = setup
@@ -383,10 +384,10 @@ class Retrieval:
     def density_builder(
         self,
         flow="nsf",
-        transforms=10,
-        hidden=50,
-        blocks=3,
-        bins=8,
+        transforms=8,
+        hidden=64,
+        blocks=2,
+        bins=5,
         dropout=0.05,
         z_score_theta="independent",
         z_score_x="independent",
@@ -480,11 +481,11 @@ class Retrieval:
     def run(
         self,
         n_threads=1,
-        n_samples=100,
+        n_samples=2048,
         n_samples_init=None,
         n_agg=1,
         resume=False,
-        n_rounds=10,
+        n_rounds=5,
         n_aug=1,
         flow_kwargs=None,
         training_kwargs=None,
@@ -510,7 +511,16 @@ class Retrieval:
         """
         _ = n_agg
         flow_kwargs = {} if flow_kwargs is None else flow_kwargs
-        training_kwargs = {} if training_kwargs is None else training_kwargs
+        training_defaults = {
+            "learning_rate": 1e-3,
+            "stop_after_epochs": 20,
+            "num_atoms": 20,
+        }
+        training_kwargs = (
+            training_defaults
+            if training_kwargs is None
+            else {**training_defaults, **training_kwargs}
+        )
         simulator_kwargs = {} if simulator_kwargs is None else simulator_kwargs
         n_samples_init = n_samples if n_samples_init is None else n_samples_init
         self._validate_alpha(alpha)
