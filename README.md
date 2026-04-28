@@ -134,6 +134,6 @@ for that training round.
 ## Next Steps
 
 - Full guide: [docs/detailed_guide.md](docs/detailed_guide.md)
-- ARCiS example: [examples/ARCiS_retrieval.py](examples/ARCiS_retrieval.py)
+- ARCiS example: [examples/ARCiS_retrieval.ipynb](examples/ARCiS_retrieval.ipynb)
 - Binary ARCiS notebook: [examples/ARCiS_binary_retrieval.ipynb](examples/ARCiS_binary_retrieval.ipynb)
 - Plotting notebook: [examples/plot_retrieval_results.ipynb](examples/plot_retrieval_results.ipynb)
