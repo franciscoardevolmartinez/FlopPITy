@@ -1343,6 +1343,98 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(samples.shape, (1000,))
         np.testing.assert_allclose(samples, np.full(1000, 12.5))
 
+    def test_run_ensemble_reuses_prior_and_aggregates_outputs(self):
+        import tempfile
+        import os
+
+        calls = []
+
+        def fake_run(member, **kwargs):
+            calls.append(kwargs)
+            output = RetrievalOutput(kwargs["output_dir"])
+            sim_output = kwargs["simulator_kwargs"]["output_dir"]
+            atmosphere_dir = os.path.join(sim_output, "arcis_files")
+            os.makedirs(atmosphere_dir, exist_ok=True)
+
+            for round_index in range(kwargs["n_rounds"]):
+                output.write_round_data(
+                    round_index=round_index,
+                    thetas=np.full((2, 1), round_index + len(calls)),
+                    nat_thetas=np.full((2, 1), 10 + round_index + len(calls)),
+                    spectra={"obs1": np.full((2, 2), round_index + len(calls))},
+                    sample_sources=np.array(["prior", "proposal"]),
+                )
+                output.write_posterior_samples(
+                    round_index + 1,
+                    np.full((3, 1), round_index + len(calls)),
+                    ["level"],
+                )
+                with open(
+                    os.path.join(atmosphere_dir, f"mixingratios_round_{round_index}.dat"),
+                    "w",
+                ) as file:
+                    file.write(f"member={len(calls)} round={round_index}\n")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            retrieval = Retrieval(ARCiS)
+            retrieval.parameters = {
+                "level": {
+                    "min": 0,
+                    "max": 1,
+                    "log": False,
+                    "post_processing": False,
+                    "universal": True,
+                },
+            }
+            with patch.object(Retrieval, "run", fake_run):
+                summary = retrieval.run_ensemble(
+                    n_members=2,
+                    n_rounds=2,
+                    output_dir=tmpdir,
+                    simulator_kwargs={"output_dir": "should_be_scoped"},
+                )
+
+            expected_prior = os.path.join(
+                tmpdir,
+                "member_001",
+                "rounds",
+                "round_000",
+                "training_data.npz",
+            )
+            aggregate_samples = np.loadtxt(
+                os.path.join(tmpdir, "aggregated", "posterior_samples_round_1.txt")
+            )
+            aggregate_data = RetrievalOutput.load_round_data(
+                os.path.join(
+                    tmpdir,
+                    "aggregated",
+                    "rounds",
+                    "round_000",
+                    "training_data.npz",
+                )
+            )
+            with open(
+                os.path.join(
+                    tmpdir,
+                    "aggregated",
+                    "arcis_files",
+                    "mixingratios_round_0.dat",
+                )
+            ) as file:
+                atmosphere = file.read()
+
+        self.assertIsNone(calls[0].get("reuse_prior"))
+        self.assertEqual(calls[1]["reuse_prior"], expected_prior)
+        self.assertEqual(
+            calls[0]["simulator_kwargs"]["output_dir"],
+            os.path.join(tmpdir, "member_001", "arcis_outputs"),
+        )
+        self.assertEqual(aggregate_samples.shape, (6,))
+        self.assertEqual(aggregate_data["par"].shape, (4, 1))
+        self.assertIn("ensemble_member=1", atmosphere)
+        self.assertIn("ensemble_member=2", atmosphere)
+        self.assertEqual(len(summary["aggregated"]["posterior_samples"]), 2)
+
     def test_from_setup_rebuilds_retrieval_and_run_config(self):
         import tempfile
         import os

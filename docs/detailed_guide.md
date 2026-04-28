@@ -401,6 +401,29 @@ The initial round can be sampled with:
 
 Later rounds always sample from the latest posterior proposal.
 
+### Ensemble Retrievals
+
+Because SNPE training is stochastic, you can repeat the same retrieval several
+times and aggregate the file outputs:
+
+```python
+summary = R.run_ensemble(
+    n_members=5,
+    output_dir="output_FlopPITy_ensemble",
+    n_rounds=5,
+    n_samples=2048,
+    simulator_kwargs=simulator_kwargs,
+)
+```
+
+Each member is written to `member_001`, `member_002`, and so on. The first
+member writes `member_001/rounds/round_000/training_data.npz`; later members
+automatically pass that file as `reuse_prior`, so the prior simulations are
+shared while later posterior rounds remain independently trained. Aggregated
+files are written under `aggregated/`, including per-round posterior samples,
+concatenated `training_data.npz` archives, and combined ARCiS atmosphere files
+when ARCiS outputs are present.
+
 ### Analytic Radius Fitting
 
 For single-object emission retrievals, radius can be removed from the sampled

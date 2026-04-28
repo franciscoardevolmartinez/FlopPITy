@@ -127,6 +127,10 @@ natural parameter units. If `save_data=True`, `rounds/round_XXX/training_data.np
 stores the sampled parameters, simulated spectra, and per-sample metadata used
 for that training round.
 
+For stochastic checks, `R.run_ensemble(...)` repeats the same retrieval,
+reuses member 1's prior simulations, and writes aggregated samples/data under
+an `aggregated/` folder.
+
 ## Next Steps
 
 - Full guide: [docs/detailed_guide.md](docs/detailed_guide.md)

@@ -614,6 +614,69 @@ class Retrieval:
             self.loss_val = self.inference._summary["best_validation_loss"]
             self._checkpoint(output_dir, "retrieval.pkl")
 
+    def run_ensemble(
+        self,
+        n_members=3,
+        output_dir="output_FlopPITy_ensemble",
+        member_prefix="member",
+        aggregate=True,
+        **run_kwargs,
+    ):
+        """Run the same retrieval several times and aggregate file outputs.
+
+        The first ensemble member generates the prior simulations with
+        ``save_data=True``. Later members reuse that first round through
+        ``reuse_prior`` so stochastic posterior training is repeated without
+        recomputing the prior grid.
+        """
+        n_members = int(n_members)
+        if n_members <= 0:
+            raise ValueError("n_members must be a positive integer.")
+
+        os.makedirs(output_dir, exist_ok=True)
+        run_kwargs = dict(run_kwargs)
+        run_kwargs["save_data"] = True
+        n_rounds = int(run_kwargs.get("n_rounds", 5))
+        if n_rounds <= 0:
+            raise ValueError("run_ensemble requires n_rounds > 0.")
+
+        member_dirs = []
+        prior_round_path = None
+        for member_index in range(n_members):
+            member_dir = os.path.join(
+                output_dir,
+                f"{member_prefix}_{member_index + 1:03d}",
+            )
+            member_dirs.append(member_dir)
+            member = self._fresh_ensemble_member()
+            member_kwargs = self._ensemble_member_run_kwargs(
+                run_kwargs=run_kwargs,
+                member_dir=member_dir,
+                member_index=member_index,
+                prior_round_path=prior_round_path,
+            )
+
+            print(f"Starting ensemble member {member_index + 1}/{n_members}")
+            member.run(**member_kwargs)
+            if member_index == 0:
+                prior_round_path = RetrievalOutput(member_dir).round_data_path(0)
+
+        summary = {
+            "n_members": n_members,
+            "output_dir": output_dir,
+            "member_dirs": member_dirs,
+            "reuse_prior": prior_round_path,
+            "aggregated": {},
+        }
+        if aggregate:
+            summary["aggregated"] = self._aggregate_ensemble_outputs(
+                output_dir=output_dir,
+                member_dirs=member_dirs,
+                n_rounds=n_rounds,
+            )
+        self.ensemble_summary = summary
+        return summary
+
     def write_setup_log(self, output_dir, run_config=None, filename="retrieval_setup.json"):
         """Write a JSON setup log describing observations, parameters, and run options."""
         payload = self._setup_log_payload(run_config=run_config)
@@ -863,6 +926,201 @@ class Retrieval:
             self.output = output
         return output
 
+    def _fresh_ensemble_member(self):
+        member = copy.deepcopy(self)
+        for key in TRANSIENT_STATE:
+            if hasattr(member, key):
+                delattr(member, key)
+        for key in (
+            "prior",
+            "proposals",
+            "posteriors",
+            "posterior",
+            "posterior_estimator",
+            "inference",
+            "density",
+            "loss_val",
+            "output",
+            "ensemble_summary",
+        ):
+            if hasattr(member, key):
+                delattr(member, key)
+        member.completed_rounds = 0
+        return member
+
+    def _ensemble_member_run_kwargs(
+        self,
+        run_kwargs,
+        member_dir,
+        member_index,
+        prior_round_path,
+    ):
+        member_kwargs = copy.deepcopy(run_kwargs)
+        member_kwargs["output_dir"] = member_dir
+        member_kwargs["resume"] = False
+        if member_index > 0:
+            member_kwargs["reuse_prior"] = prior_round_path
+
+        simulator_kwargs = copy.deepcopy(member_kwargs.get("simulator_kwargs", {}))
+        if self._uses_arcis_simulator():
+            simulator_kwargs["output_dir"] = os.path.join(member_dir, "arcis_outputs")
+        member_kwargs["simulator_kwargs"] = simulator_kwargs
+        return member_kwargs
+
+    def _aggregate_ensemble_outputs(self, output_dir, member_dirs, n_rounds):
+        aggregate_dir = os.path.join(output_dir, "aggregated")
+        os.makedirs(aggregate_dir, exist_ok=True)
+        aggregated = {
+            "posterior_samples": [],
+            "training_data": [],
+            "atmospheres": [],
+        }
+
+        for round_index in range(n_rounds):
+            posterior_path = self._aggregate_ensemble_posterior_samples(
+                aggregate_dir,
+                member_dirs,
+                round_index,
+            )
+            if posterior_path is not None:
+                aggregated["posterior_samples"].append(posterior_path)
+
+            training_path = self._aggregate_ensemble_round_data(
+                aggregate_dir,
+                member_dirs,
+                round_index,
+            )
+            if training_path is not None:
+                aggregated["training_data"].append(training_path)
+
+            atmosphere_path = self._aggregate_ensemble_atmospheres(
+                aggregate_dir,
+                member_dirs,
+                round_index,
+            )
+            if atmosphere_path is not None:
+                aggregated["atmospheres"].append(atmosphere_path)
+
+        self._write_ensemble_summary(output_dir, member_dirs, aggregated)
+        return aggregated
+
+    def _aggregate_ensemble_posterior_samples(
+        self,
+        aggregate_dir,
+        member_dirs,
+        round_index,
+    ):
+        arrays = []
+        header = " ".join(str(name) for name in self.parameters.keys())
+        for member_dir in member_dirs:
+            path = RetrievalOutput(member_dir).posterior_samples_path(round_index + 1)
+            if os.path.exists(path):
+                arrays.append(self._load_posterior_sample_file(path))
+        if not arrays:
+            return None
+
+        output = os.path.join(
+            aggregate_dir,
+            f"posterior_samples_round_{round_index + 1}.txt",
+        )
+        np.savetxt(output, np.vstack(arrays), header=header)
+        return output
+
+    def _load_posterior_sample_file(self, path):
+        samples = np.loadtxt(path)
+        samples = np.asarray(samples)
+        if samples.ndim == 1:
+            n_parameters = len(self.parameters)
+            if n_parameters == 1:
+                return samples.reshape(-1, 1)
+            return samples.reshape(1, -1)
+        return samples
+
+    def _aggregate_ensemble_round_data(self, aggregate_dir, member_dirs, round_index):
+        round_data = []
+        for member_dir in member_dirs:
+            path = RetrievalOutput(member_dir).round_data_path(round_index)
+            if os.path.exists(path):
+                round_data.append(RetrievalOutput.load_round_data(path))
+        if not round_data:
+            return None
+
+        spectra = self._concat_round_dicts(round_data, "spec")
+        processed_spectra = self._concat_optional_round_dicts(round_data, "post_spec")
+        output = RetrievalOutput(aggregate_dir)
+        return output.write_round_data(
+            round_index=round_index,
+            thetas=np.concatenate([data["par"] for data in round_data], axis=0),
+            nat_thetas=self._concat_optional_arrays(round_data, "nat_par"),
+            spectra=spectra,
+            sample_sources=self._concat_optional_arrays(round_data, "sample_sources"),
+            processed_spectra=processed_spectra,
+            fitted_radii=self._concat_optional_arrays(round_data, "fitted_radii"),
+        )
+
+    def _aggregate_ensemble_atmospheres(self, aggregate_dir, member_dirs, round_index):
+        contents = []
+        for member_index, member_dir in enumerate(member_dirs):
+            path = os.path.join(
+                member_dir,
+                "arcis_outputs",
+                "arcis_files",
+                f"mixingratios_round_{round_index}.dat",
+            )
+            if not os.path.exists(path):
+                continue
+            with open(path) as file:
+                contents.append(
+                    f"# ensemble_member={member_index + 1} source={path}\n"
+                    + file.read().rstrip()
+                    + "\n"
+                )
+        if not contents:
+            return None
+
+        output_dir = os.path.join(aggregate_dir, "arcis_files")
+        os.makedirs(output_dir, exist_ok=True)
+        output = os.path.join(output_dir, f"mixingratios_round_{round_index}.dat")
+        with open(output, "w") as file:
+            file.write("\n".join(contents))
+        return output
+
+    def _write_ensemble_summary(self, output_dir, member_dirs, aggregated):
+        payload = {
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+            "n_members": len(member_dirs),
+            "member_dirs": member_dirs,
+            "aggregated": aggregated,
+        }
+        path = os.path.join(output_dir, "ensemble_summary.json")
+        with open(path, "w") as file:
+            json.dump(self._json_safe(payload), file, indent=2, sort_keys=True)
+            file.write("\n")
+        return path
+
+    @staticmethod
+    def _concat_round_dicts(round_data, key):
+        keys = round_data[0][key].keys()
+        return {
+            item_key: np.concatenate(
+                [data[key][item_key] for data in round_data],
+                axis=0,
+            )
+            for item_key in keys
+        }
+
+    @classmethod
+    def _concat_optional_round_dicts(cls, round_data, key):
+        if not all(key in data for data in round_data):
+            return None
+        return cls._concat_round_dicts(round_data, key)
+
+    @staticmethod
+    def _concat_optional_arrays(round_data, key):
+        if not all(key in data for data in round_data):
+            return None
+        return np.concatenate([data[key] for data in round_data], axis=0)
+
     def _sample_round_thetas(
         self,
         proposal,
@@ -958,14 +1216,7 @@ class Retrieval:
         return round_kwargs
 
     def _prepare_simulator_round_outputs(self, simulator_kwargs):
-        simulator_name = getattr(self.simulator, "__name__", None)
-        base_simulator = getattr(self.simulator, "simulator", None)
-        base_simulator_name = getattr(base_simulator, "__name__", None)
-        if simulator_name not in {
-            "ARCiS",
-            "ARCiS_binary",
-            "ARCiS_multiple",
-        } and base_simulator_name != "ARCiS":
+        if not self._uses_arcis_simulator():
             return
         if not simulator_kwargs.get("save_atmosphere", True):
             return
@@ -980,6 +1231,16 @@ class Retrieval:
         path = self._arcis_artifact_path(simulator_kwargs, filename)
         if os.path.exists(path):
             os.remove(path)
+
+    def _uses_arcis_simulator(self):
+        simulator_name = getattr(self.simulator, "__name__", None)
+        base_simulator = getattr(self.simulator, "simulator", None)
+        base_simulator_name = getattr(base_simulator, "__name__", None)
+        return simulator_name in {
+            "ARCiS",
+            "ARCiS_binary",
+            "ARCiS_multiple",
+        } or base_simulator_name == "ARCiS"
 
     def _save_posterior_samples(self, output_dir, posterior, round_index):
         samples = posterior.sample((1000,))
