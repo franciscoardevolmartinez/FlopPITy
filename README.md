@@ -127,6 +127,10 @@ natural parameter units. If `save_data=True`, `rounds/round_XXX/training_data.np
 stores the sampled parameters, simulated spectra, and per-sample metadata used
 for that training round.
 
+## Basic troubleshooting
+
+ - It takes a very long time to sample from the posterior. "Only xxx% of samples are accepted, consider changing to MCMC": This probably means that the samples are too dissimilar to the observation. Usual suspects: incorrectly setup model, incorrect priors, or mismatching wavelength axes.
+
 ## Next Steps
 
 - Full guide: [docs/detailed_guide.md](docs/detailed_guide.md)
