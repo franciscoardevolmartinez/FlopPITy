@@ -522,6 +522,7 @@ class Retrieval:
             else {**training_defaults, **training_kwargs}
         )
         simulator_kwargs = {} if simulator_kwargs is None else simulator_kwargs
+        simulator_kwargs = self._freeze_arcis_input_for_run(simulator_kwargs)
         n_samples_init = n_samples if n_samples_init is None else n_samples_init
         self._validate_alpha(alpha)
         self._configure_radius_fit(
@@ -958,14 +959,7 @@ class Retrieval:
         return round_kwargs
 
     def _prepare_simulator_round_outputs(self, simulator_kwargs):
-        simulator_name = getattr(self.simulator, "__name__", None)
-        base_simulator = getattr(self.simulator, "simulator", None)
-        base_simulator_name = getattr(base_simulator, "__name__", None)
-        if simulator_name not in {
-            "ARCiS",
-            "ARCiS_binary",
-            "ARCiS_multiple",
-        } and base_simulator_name != "ARCiS":
+        if not self._uses_arcis_simulator():
             return
         if not simulator_kwargs.get("save_atmosphere", True):
             return
@@ -980,6 +974,62 @@ class Retrieval:
         path = self._arcis_artifact_path(simulator_kwargs, filename)
         if os.path.exists(path):
             os.remove(path)
+
+    def _freeze_arcis_input_for_run(self, simulator_kwargs):
+        simulator_kwargs = dict(simulator_kwargs)
+        if not self._uses_arcis_simulator():
+            return simulator_kwargs
+
+        input_file = simulator_kwargs.get("input_file", "arcis_input.in")
+        output_dir = simulator_kwargs.get("output_dir", "./arcis_outputs")
+        frozen_input = self._frozen_arcis_input_path(
+            input_file=input_file,
+            output_dir=output_dir,
+            arcis_file_dir=simulator_kwargs.get("arcis_file_dir", "arcis_files"),
+        )
+        os.makedirs(os.path.dirname(frozen_input), exist_ok=True)
+
+        with open(input_file, "r") as file:
+            lines = file.readlines()
+        lines = self._arcis_input_lines_with_makeai(lines)
+        with open(frozen_input, "w") as file:
+            file.writelines(lines)
+
+        simulator_kwargs.setdefault("original_input_file", input_file)
+        simulator_kwargs["input_file"] = frozen_input
+        return simulator_kwargs
+
+    @staticmethod
+    def _arcis_input_lines_with_makeai(lines):
+        lines = list(lines)
+        found_makeai = False
+        for i, line in enumerate(lines):
+            if "makeai=" in line.lower():
+                found_makeai = True
+                if ".false." in line.lower():
+                    print('Warning: Found "makeai=.false." - changing to "makeai=.true."')
+                    lines[i] = "makeai=.true.\n"
+                break
+        if not found_makeai:
+            print('Warning: No "makeai=" found - adding "makeai=.true."')
+            lines.append("makeai=.true.\n")
+        return lines
+
+    @staticmethod
+    def _frozen_arcis_input_path(input_file, output_dir, arcis_file_dir):
+        if not os.path.isabs(arcis_file_dir):
+            arcis_file_dir = os.path.join(output_dir, arcis_file_dir)
+        return os.path.join(arcis_file_dir, os.path.basename(input_file))
+
+    def _uses_arcis_simulator(self):
+        simulator_name = getattr(self.simulator, "__name__", None)
+        base_simulator = getattr(self.simulator, "simulator", None)
+        base_simulator_name = getattr(base_simulator, "__name__", None)
+        return simulator_name in {
+            "ARCiS",
+            "ARCiS_binary",
+            "ARCiS_multiple",
+        } or base_simulator_name == "ARCiS"
 
     def _save_posterior_samples(self, output_dir, posterior, round_index):
         samples = posterior.sample((1000,))

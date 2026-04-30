@@ -241,7 +241,10 @@ ARCiS wrapper notes:
 - `parameter_grid_dir` controls where ARCiS parameter grid files are written.
   Relative paths are created inside `arcis_file_dir`; the default is
   `parameter_grids`.
-- The wrapper forces or adds `makeai=.true.` in a copied input file.
+- At the start of `R.run()`, FlopPITy freezes the ARCiS input by copying it to
+  `arcis_file_dir`, forcing or adding `makeai=.true.`, and using that frozen
+  copy for every later ARCiS subprocess call in the run. This protects a
+  running retrieval from accidental edits to the original input file.
 - Temporary `outputARCiS_*` directories are removed after spectra and
   atmosphere structures are read.
 - ARCiS logs are collected under the configured log directory.

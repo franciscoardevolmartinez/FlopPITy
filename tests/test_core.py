@@ -830,6 +830,36 @@ class TestHelpers(unittest.TestCase):
             retrieval._prepare_simulator_round_outputs(kwargs)
             self.assertTrue(os.path.exists(output_path))
 
+    def test_arcis_input_is_frozen_once_for_run(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, "arcis.in")
+            arcis_output = os.path.join(tmpdir, "arcis_output")
+            with open(input_path, "w") as file:
+                file.write("makeai=.false.\noriginal=1\n")
+
+            retrieval = Retrieval(ARCiS, obs_type="emis")
+            simulator_kwargs = retrieval._freeze_arcis_input_for_run(
+                {
+                    "input_file": input_path,
+                    "output_dir": arcis_output,
+                }
+            )
+
+            frozen_path = os.path.join(arcis_output, "arcis_files", "arcis.in")
+            with open(input_path, "w") as file:
+                file.write("makeai=.true.\nmodified=1\n")
+            with open(frozen_path) as file:
+                frozen_contents = file.read()
+
+        self.assertEqual(simulator_kwargs["input_file"], frozen_path)
+        self.assertEqual(simulator_kwargs["original_input_file"], input_path)
+        self.assertIn("makeai=.true.", frozen_contents)
+        self.assertIn("original=1", frozen_contents)
+        self.assertNotIn("modified=1", frozen_contents)
+
     def test_psimulator_passes_global_sample_offsets_to_chunks(self):
         def simulator(obs, parameters, thread=0, **kwargs):
             offsets.append(kwargs["_sample_offset"])
