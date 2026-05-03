@@ -954,6 +954,91 @@ class TestHelpers(unittest.TestCase):
 
         np.testing.assert_allclose(theta_tensor.numpy(), np.full((3, 1), 0.2))
 
+    def test_generate_training_data_returns_noisy_spectra(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.obs = {
+            "obs": np.array([[1.0, 0.0, 0.1], [2.0, 0.0, 0.2]]),
+        }
+        retrieval.error_inflation = 2
+        retrieval.parameters = {
+            "level": {
+                "min": 0,
+                "max": 1,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+        }
+        retrieval.prior = DummyProposal(0.8)
+
+        with patch("numpy.random.standard_normal", return_value=np.array([1.0, -1.0])):
+            _, x_tensor = retrieval.generate_training_data(
+                proposal=DummyProposal(0.8),
+                r=0,
+                n_samples=3,
+                n_samples_init=3,
+                sample_prior_method="random",
+                n_threads=1,
+                simulator_kwargs={},
+                n_aug=1,
+                initial_round=True,
+            )
+
+        expected = np.array([[1.0, 0.4], [1.0, 0.4], [1.0, 0.4]])
+        np.testing.assert_allclose(x_tensor.numpy(), expected)
+
+    def test_run_fits_preprocessing_only_on_first_fresh_round_training_x(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.default_obs = np.array([[0.5, 0.5]])
+        retrieval.completed_rounds = 0
+
+        theta_round_1 = torch.tensor([[0.1], [0.2]])
+        theta_round_2 = torch.tensor([[0.3], [0.4]])
+        x_round_1 = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        x_round_2 = torch.tensor([[5.0, 6.0], [7.0, 8.0]])
+        preprocessing_calls = []
+        retrieval.posteriors = []
+        retrieval.proposals = [DummyProposal(0.0)]
+
+        def record_preprocessing(x, fit_preprocessing=False, fit_pca=False):
+            preprocessing_calls.append(
+                {
+                    "x": x.clone() if isinstance(x, torch.Tensor) else np.array(x),
+                    "fit_preprocessing": fit_preprocessing,
+                    "fit_pca": fit_pca,
+                }
+            )
+            return x
+
+        with patch.object(retrieval, "_prepare_run", return_value=DummyProposal(0.1)), \
+            patch.object(retrieval, "write_setup_log"), \
+            patch.object(retrieval, "generate_training_data", side_effect=[
+                (theta_round_1, x_round_1),
+                (theta_round_2, x_round_2),
+            ]), \
+            patch.object(retrieval, "_checkpoint"), \
+            patch.object(retrieval, "_save_round_data"), \
+            patch.object(retrieval, "_save_sbi_data"), \
+            patch.object(retrieval, "do_preprocessing", side_effect=record_preprocessing), \
+            patch.object(retrieval, "train"), \
+            patch.object(retrieval, "get_posterior", side_effect=lambda: setattr(retrieval, "posterior", DummyProposal(0.9))):
+            retrieval.inference = types.SimpleNamespace(
+                _summary={"best_validation_loss": 1.0}
+            )
+            retrieval.prior = DummyProposal(0.0)
+            retrieval.run(n_rounds=2, output_dir="unused")
+
+        training_calls = [
+            call for call in preprocessing_calls
+            if isinstance(call["x"], torch.Tensor)
+        ]
+        self.assertEqual(
+            [call["fit_preprocessing"] for call in training_calls],
+            [True, False],
+        )
+        np.testing.assert_array_equal(training_calls[0]["x"].numpy(), x_round_1.numpy())
+        np.testing.assert_array_equal(training_calls[1]["x"].numpy(), x_round_2.numpy())
+
     def test_mixture_proposal_tracks_per_sample_sources(self):
         from floppity.flappity import _MixtureProposal
 
@@ -1481,6 +1566,34 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(samples.shape, (1000,))
         np.testing.assert_allclose(samples, np.full(1000, 0.25))
 
+    def test_sbi_data_archive_stores_training_and_default_x(self):
+        import tempfile
+        import os
+        import json
+
+        output = RetrievalOutput
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = output(tmpdir).write_sbi_data(
+                round_index=1,
+                theta=np.array([[0.1], [0.2]]),
+                x=np.array([[1.0, -1.0], [0.5, -0.5]]),
+                default_x=np.array([[0.0, 0.25]]),
+                parameter_names=["level"],
+            )
+
+            with np.load(path, allow_pickle=False) as archive:
+                theta = archive["theta"]
+                x = archive["x"]
+                default_x = archive["default_x"]
+                metadata = json.loads(archive["metadata"].item())
+
+        self.assertTrue(path.endswith(os.path.join("round_001", "sbi_data.npz")))
+        np.testing.assert_array_equal(theta, np.array([[0.1], [0.2]]))
+        np.testing.assert_array_equal(x, np.array([[1.0, -1.0], [0.5, -0.5]]))
+        np.testing.assert_array_equal(default_x, np.array([[0.0, 0.25]]))
+        self.assertEqual(metadata["format"], "floppity.sbi_data")
+        self.assertEqual(metadata["parameter_names"], ["level"])
+
     def test_run_ensemble_reuses_prior_and_aggregates_outputs(self):
         import tempfile
         import os
@@ -1642,6 +1755,69 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(summary["n_members"], 4)
         self.assertEqual(len(summary["new_members"]), 2)
         self.assertEqual(aggregate_samples.shape, (12,))
+
+    def test_run_ensemble_can_extend_existing_member_rounds(self):
+        import tempfile
+        import os
+
+        calls = []
+
+        class ExistingMember:
+            def run(self, **kwargs):
+                calls.append(kwargs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for member_name in ("member_001", "member_002"):
+                member_dir = os.path.join(tmpdir, member_name)
+                os.makedirs(member_dir)
+                with open(os.path.join(member_dir, "retrieval.pkl"), "w") as file:
+                    file.write("checkpoint placeholder")
+                output = RetrievalOutput(member_dir)
+                output.write_round_data(
+                    round_index=0,
+                    thetas=np.full((2, 1), 1.0),
+                    nat_thetas=np.full((2, 1), 1.0),
+                    spectra={"obs1": np.full((2, 2), 1.0)},
+                    sample_sources=np.array(["prior", "proposal"]),
+                )
+
+            retrieval = Retrieval(ARCiS)
+            retrieval.parameters = {
+                "level": {
+                    "min": 0,
+                    "max": 1,
+                    "log": False,
+                    "post_processing": False,
+                    "universal": True,
+                },
+            }
+            with patch.object(retrieval, "_load_ensemble_member", return_value=ExistingMember()):
+                summary = retrieval.run_ensemble(
+                    n_members=2,
+                    n_rounds=3,
+                    output_dir=tmpdir,
+                    resume=True,
+                    extend_rounds=True,
+                    aggregate=False,
+                    simulator_kwargs={},
+                )
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(call["resume"] for call in calls))
+        self.assertTrue(calls[0]["output_dir"].endswith("member_001"))
+        self.assertTrue(calls[1]["output_dir"].endswith("member_002"))
+        self.assertTrue(calls[0]["simulator_kwargs"]["output_dir"].endswith("member_001/arcis_outputs"))
+        self.assertEqual(summary["new_members"], [])
+        self.assertEqual(len(summary["extended_members"]), 2)
+
+    def test_run_ensemble_rejects_conflicting_resume_modes(self):
+        retrieval = Retrieval(flat_simulator)
+        with self.assertRaises(ValueError):
+            retrieval.run_ensemble(
+                resume=True,
+                add_members=True,
+                extend_rounds=True,
+            )
 
     def test_from_setup_rebuilds_retrieval_and_run_config(self):
         import tempfile

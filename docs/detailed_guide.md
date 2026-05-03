@@ -359,6 +359,7 @@ R.run(
     radius_bounds=None,
     radius_reference=1.0,
     save_posterior_samples=False,
+    save_sbi_data=None,
 )
 ```
 
@@ -394,6 +395,8 @@ Important options:
   `fit_radius=True`. The default assumes models are generated at `1.0 Rjup`.
 - `save_posterior_samples`: if `True`, draw and save 1000 diagnostic posterior
   samples after each round.
+- `save_sbi_data`: if `True`, write the exact normalized arrays passed to SBI.
+  Defaults to the value of `save_data`.
 - `resume`: continue training from an already trained and loaded retrieval.
 
 ### Sampling Methods
@@ -449,6 +452,24 @@ With `add_members=True`, `n_members=2` means "append two new members" such as
 `member_006` and `member_007`. With `resume=True` and `add_members=False`,
 `n_members` is treated as the desired total number of members, so
 `n_members=10` extends the ensemble only until it contains ten members.
+
+To add more rounds to every existing member instead:
+
+```python
+summary = R.run_ensemble(
+    output_dir="output_FlopPITy_ensemble",
+    resume=True,
+    extend_rounds=True,
+    n_rounds=2,
+    n_samples=2048,
+    simulator_kwargs=simulator_kwargs,
+)
+```
+
+With `extend_rounds=True`, `n_rounds=2` means "run two additional rounds for
+each existing member". This resumes each member from its own
+`member_XXX/retrieval.pkl` checkpoint and samples from that member's latest
+posterior proposal.
 
 ### Analytic Radius Fitting
 
@@ -557,6 +578,10 @@ R = Retrieval.load("retrieval.pkl")
   parameters, raw simulator spectra, post-processed spectra, and per-sample
   source labels (`prior` or `proposal`) while preserving observation keys such
   as `obs1` or `miri`.
+- `rounds/round_<NNN>/sbi_data.npz`: optional SBI-facing arrays written when
+  `save_sbi_data=True` or when `save_data=True` and `save_sbi_data` is left as
+  `None`. It contains `theta`, the preprocessed simulator output `x`, and
+  `default_x`, the preprocessed observation used for posterior inference.
 
 Pickle is still used for retrieval checkpoints because those contain trained
 Python and `sbi` objects. Array-heavy training data is written as `.npz`, which

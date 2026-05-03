@@ -42,6 +42,9 @@ class RetrievalOutput:
     def round_data_path(self, round_index):
         return os.path.join(self.round_dir(round_index), "training_data.npz")
 
+    def sbi_data_path(self, round_index):
+        return os.path.join(self.round_dir(round_index), "sbi_data.npz")
+
     def observations_dir(self):
         return os.path.join(self.output_dir, "observations")
 
@@ -148,6 +151,40 @@ class RetrievalOutput:
                 arrays[array_name] = np.asarray(value)
 
         arrays["metadata"] = np.array(json.dumps(metadata))
+        np.savez_compressed(path, **arrays)
+        return path
+
+    def write_sbi_data(
+        self,
+        round_index,
+        theta,
+        x,
+        default_x,
+        parameter_names=None,
+    ):
+        """Write the exact tensors passed to SBI training/inference."""
+        path = self.sbi_data_path(round_index)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        arrays = {
+            "theta": np.asarray(theta),
+            "x": np.asarray(x),
+            "default_x": np.asarray(default_x),
+            "metadata": np.array(
+                json.dumps(
+                    {
+                        "format": "floppity.sbi_data",
+                        "version": 1,
+                        "round_index": int(round_index),
+                        "parameter_names": [
+                            str(name) for name in (parameter_names or [])
+                        ],
+                        "theta_description": "Parameter tensor passed to append_simulations.",
+                        "x_description": "Preprocessed simulator output passed to append_simulations.",
+                        "default_x_description": "Preprocessed observation passed to posterior.set_default_x.",
+                    }
+                )
+            ),
+        }
         np.savez_compressed(path, **arrays)
         return path
 

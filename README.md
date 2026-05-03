@@ -126,12 +126,14 @@ If `save_posterior_samples=True`, `posterior_samples_round_X.txt` stores 1000
 posterior samples from each round in natural parameter units. If `save_data=True`,
 `rounds/round_XXX/training_data.npz`
 stores the sampled parameters, simulated spectra, and per-sample metadata used
-for that training round.
+for that training round. It also writes `rounds/round_XXX/sbi_data.npz` with the
+exact normalized `theta`, `x`, and `default_x` arrays passed to SBI.
 
 For stochastic checks, `R.run_ensemble(...)` repeats the same retrieval,
 reuses member 1's prior simulations, and writes aggregated samples/data under
 an `aggregated/` folder. Use `resume=True, add_members=True` to append more
-members to the same ensemble later.
+members, or `resume=True, extend_rounds=True` to continue every existing member
+for more rounds.
 
 ## Basic troubleshooting
 

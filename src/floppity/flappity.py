@@ -522,6 +522,7 @@ class Retrieval:
         radius_bounds=None,
         radius_reference=1.0,
         save_posterior_samples=False,
+        save_sbi_data=None,
     ):
         """
         Run SNPE-C retrieval rounds.
@@ -535,6 +536,7 @@ class Retrieval:
         flow_kwargs = {} if flow_kwargs is None else flow_kwargs
         training_kwargs = {} if training_kwargs is None else training_kwargs
         simulator_kwargs = {} if simulator_kwargs is None else simulator_kwargs
+        save_sbi_data = save_data if save_sbi_data is None else bool(save_sbi_data)
         simulator_kwargs = self._freeze_arcis_input_for_run(simulator_kwargs)
         n_samples_init = n_samples if n_samples_init is None else n_samples_init
         self._validate_alpha(alpha)
@@ -581,6 +583,7 @@ class Retrieval:
                 "radius_bounds": self.radius_bounds,
                 "radius_reference": self.radius_reference,
                 "save_posterior_samples": save_posterior_samples,
+                "save_sbi_data": save_sbi_data,
                 "start_round": start_round,
                 "final_round": start_round + n_rounds,
             },
@@ -614,6 +617,15 @@ class Retrieval:
                 fit_preprocessing=round_index == 0 and not resume,
                 fit_pca=self._pca_enabled() and not self._pca_is_fitted(),
             )
+            self.default_obs_norm = self.do_preprocessing(self.default_obs)
+            self._save_sbi_data(
+                output_dir,
+                save_sbi_data,
+                round_index,
+                theta_tensor,
+                x_norm_tensor,
+                self.default_obs_norm,
+            )
             self.train(theta_tensor, x_norm_tensor, proposal, **training_kwargs)
             self.get_posterior()
 
@@ -639,6 +651,7 @@ class Retrieval:
         aggregate=True,
         resume=False,
         add_members=False,
+        extend_rounds=False,
         **run_kwargs,
     ):
         """Run the same retrieval several times and aggregate file outputs.
@@ -646,12 +659,17 @@ class Retrieval:
         The first ensemble member generates the prior simulations with
         ``save_data=True``. Later members reuse that first round through
         ``reuse_prior`` so stochastic posterior training is repeated without
-        recomputing the prior grid. When ``resume=True``, existing member
-        directories are preserved and new members are appended.
+        recomputing the prior grid. Use ``resume=True, add_members=True`` to
+        append new members, or ``resume=True, extend_rounds=True`` to continue
+        every existing member for additional SNPE rounds.
         """
         n_members = int(n_members)
         if n_members <= 0:
             raise ValueError("n_members must be a positive integer.")
+        if add_members and extend_rounds:
+            raise ValueError("Use either add_members=True or extend_rounds=True, not both.")
+        if extend_rounds and not resume:
+            raise ValueError("extend_rounds=True requires resume=True.")
 
         os.makedirs(output_dir, exist_ok=True)
         run_kwargs = dict(run_kwargs)
@@ -667,6 +685,50 @@ class Retrieval:
                 "directories. Use resume=True to add members or choose a new "
                 "output_dir."
             )
+
+        extended_member_dirs = []
+        if extend_rounds:
+            if not existing_member_dirs:
+                raise FileNotFoundError(
+                    "Cannot extend ensemble rounds because no existing member "
+                    f"directories were found in {output_dir!r}."
+                )
+            for member_dir in existing_member_dirs:
+                member_number = self._ensemble_member_number(member_dir, member_prefix)
+                member = self._load_ensemble_member(member_dir)
+                member_kwargs = self._ensemble_member_resume_kwargs(
+                    run_kwargs=run_kwargs,
+                    member_dir=member_dir,
+                )
+                print(f"Extending ensemble member {member_number}")
+                member.run(**member_kwargs)
+                extended_member_dirs.append(member_dir)
+
+            member_dirs = self._ensemble_member_dirs(output_dir, member_prefix)
+            aggregate_rounds = self._ensemble_total_rounds(member_dirs, n_rounds)
+            summary = {
+                "n_members": len(member_dirs),
+                "new_members": [],
+                "extended_members": extended_member_dirs,
+                "output_dir": output_dir,
+                "member_dirs": member_dirs,
+                "reuse_prior": self._existing_ensemble_prior_round_path(
+                    output_dir,
+                    member_prefix,
+                ),
+                "resume": resume,
+                "add_members": add_members,
+                "extend_rounds": extend_rounds,
+                "aggregated": {},
+            }
+            if aggregate:
+                summary["aggregated"] = self._aggregate_ensemble_outputs(
+                    output_dir=output_dir,
+                    member_dirs=member_dirs,
+                    n_rounds=aggregate_rounds,
+                )
+            self.ensemble_summary = summary
+            return summary
 
         start_number, stop_number = self._ensemble_member_number_range(
             n_members=n_members,
@@ -705,17 +767,21 @@ class Retrieval:
         summary = {
             "n_members": len(member_dirs),
             "new_members": new_member_dirs,
+            "extended_members": [],
             "output_dir": output_dir,
             "member_dirs": member_dirs,
             "reuse_prior": prior_round_path,
             "resume": resume,
+            "add_members": add_members,
+            "extend_rounds": extend_rounds,
             "aggregated": {},
         }
         if aggregate:
+            aggregate_rounds = self._ensemble_total_rounds(member_dirs, n_rounds)
             summary["aggregated"] = self._aggregate_ensemble_outputs(
                 output_dir=output_dir,
                 member_dirs=member_dirs,
-                n_rounds=n_rounds,
+                n_rounds=aggregate_rounds,
             )
         self.ensemble_summary = summary
         return summary
@@ -748,6 +814,7 @@ class Retrieval:
                 "completed_checkpoint": "retrieval.pkl",
                 "pre_round_checkpoint_pattern": "retrieval_pre_round_<N>.pkl",
                 "saved_data_pattern": "rounds/round_<NNN>/training_data.npz",
+                "sbi_data_pattern": "rounds/round_<NNN>/sbi_data.npz",
                 "posterior_samples_pattern": "posterior_samples_round_<N>.txt",
                 "observations_dir": "observations",
             },
@@ -959,6 +1026,31 @@ class Retrieval:
                 fitted_radii=getattr(self, "best_fit_radii", None),
             )
 
+    def _save_sbi_data(
+        self,
+        output_dir,
+        save_sbi_data,
+        round_index,
+        theta_tensor,
+        x_norm_tensor,
+        default_obs_norm,
+    ):
+        if not save_sbi_data:
+            return
+        self._output_manager(output_dir).write_sbi_data(
+            round_index=round_index,
+            theta=self._tensor_to_numpy(theta_tensor),
+            x=self._tensor_to_numpy(x_norm_tensor),
+            default_x=self._tensor_to_numpy(default_obs_norm),
+            parameter_names=self.parameters.keys(),
+        )
+
+    @staticmethod
+    def _tensor_to_numpy(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+        return np.asarray(value)
+
     def _output_manager(self, output_dir):
         output = getattr(self, "output", None)
         if output is None or output.output_dir != output_dir:
@@ -987,6 +1079,15 @@ class Retrieval:
                 delattr(member, key)
         member.completed_rounds = 0
         return member
+
+    def _load_ensemble_member(self, member_dir):
+        checkpoint = os.path.join(member_dir, "retrieval.pkl")
+        if not os.path.exists(checkpoint):
+            raise FileNotFoundError(
+                "Cannot extend ensemble member because its completed checkpoint "
+                f"was not found: {checkpoint}"
+            )
+        return self.load(checkpoint)
 
     def _ensemble_member_dirs(self, output_dir, member_prefix):
         paths = []
@@ -1060,6 +1161,13 @@ class Retrieval:
             )
         return prior_round_path
 
+    def _existing_ensemble_prior_round_path(self, output_dir, member_prefix):
+        first_member = os.path.join(output_dir, f"{member_prefix}_001")
+        prior_round_path = RetrievalOutput(first_member).round_data_path(0)
+        if os.path.exists(prior_round_path):
+            return prior_round_path
+        return None
+
     def _ensemble_member_run_kwargs(
         self,
         run_kwargs,
@@ -1078,6 +1186,34 @@ class Retrieval:
             simulator_kwargs["output_dir"] = os.path.join(member_dir, "arcis_outputs")
         member_kwargs["simulator_kwargs"] = simulator_kwargs
         return member_kwargs
+
+    def _ensemble_member_resume_kwargs(self, run_kwargs, member_dir):
+        member_kwargs = copy.deepcopy(run_kwargs)
+        member_kwargs["output_dir"] = member_dir
+        member_kwargs["resume"] = True
+        member_kwargs.pop("reuse_prior", None)
+
+        simulator_kwargs = copy.deepcopy(member_kwargs.get("simulator_kwargs", {}))
+        if self._uses_arcis_simulator():
+            simulator_kwargs["output_dir"] = os.path.join(member_dir, "arcis_outputs")
+        member_kwargs["simulator_kwargs"] = simulator_kwargs
+        return member_kwargs
+
+    def _ensemble_total_rounds(self, member_dirs, fallback_n_rounds):
+        max_rounds = int(fallback_n_rounds)
+        for member_dir in member_dirs:
+            rounds_dir = os.path.join(member_dir, "rounds")
+            if not os.path.isdir(rounds_dir):
+                continue
+            for name in os.listdir(rounds_dir):
+                if not name.startswith("round_"):
+                    continue
+                try:
+                    round_number = int(name[len("round_"):])
+                except ValueError:
+                    continue
+                max_rounds = max(max_rounds, round_number + 1)
+        return max_rounds
 
     def _aggregate_ensemble_outputs(self, output_dir, member_dirs, n_rounds):
         aggregate_dir = os.path.join(output_dir, "aggregated")
