@@ -1030,8 +1030,8 @@ class TestHelpers(unittest.TestCase):
         with patch.dict(sys.modules, {"sbi": fake_sbi}):
             retrieval.create_prior()
 
-        np.testing.assert_allclose(retrieval.prior.low.numpy(), [500, -12])
-        np.testing.assert_allclose(retrieval.prior.high.numpy(), [2500, -1])
+        np.testing.assert_allclose(retrieval.prior.low.numpy(), [[500, -12]])
+        np.testing.assert_allclose(retrieval.prior.high.numpy(), [[2500, -1]])
 
     def test_sobol_initial_samples_are_immediately_scaled_to_natural_units(self):
         retrieval = Retrieval(flat_simulator, obs_type="trans")

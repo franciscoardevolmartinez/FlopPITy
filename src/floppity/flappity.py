@@ -369,15 +369,16 @@ class Retrieval:
         """Construct a uniform prior in natural parameter units."""
         from sbi import utils as sbi_utils
 
-        low = []
-        high = []
-        for metadata in self.parameters.values():
-            low.append(metadata["min"])
-            high.append(metadata["max"])
+        self.dims = len(self.parameters)
+        low = np.empty((self.dims,))
+        high = np.empty((self.dims,))
+        for i, metadata in enumerate(self.parameters.values()):
+            low[i] = metadata["min"]
+            high[i] = metadata["max"]
 
         self.prior = sbi_utils.BoxUniform(
-            low=torch.as_tensor(low, dtype=torch.float32),
-            high=torch.as_tensor(high, dtype=torch.float32),
+            low=torch.as_tensor(low.reshape(1, -1), dtype=torch.float32),
+            high=torch.as_tensor(high.reshape(1, -1), dtype=torch.float32),
         )
 
     def density_builder(
