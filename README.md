@@ -129,7 +129,8 @@ for that training round.
 
 For stochastic checks, `R.run_ensemble(...)` repeats the same retrieval,
 reuses member 1's prior simulations, and writes aggregated samples/data under
-an `aggregated/` folder.
+an `aggregated/` folder. Use `resume=True, add_members=True` to append more
+members to the same ensemble later.
 
 ## Basic troubleshooting
 

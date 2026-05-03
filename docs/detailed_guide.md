@@ -428,6 +428,25 @@ files are written under `aggregated/`, including per-round posterior samples,
 concatenated `training_data.npz` archives, and combined ARCiS atmosphere files
 when ARCiS outputs are present.
 
+To add more members to an existing ensemble later:
+
+```python
+summary = R.run_ensemble(
+    n_members=2,
+    output_dir="output_FlopPITy_ensemble",
+    resume=True,
+    add_members=True,
+    n_rounds=5,
+    n_samples=2048,
+    simulator_kwargs=simulator_kwargs,
+)
+```
+
+With `add_members=True`, `n_members=2` means "append two new members" such as
+`member_006` and `member_007`. With `resume=True` and `add_members=False`,
+`n_members` is treated as the desired total number of members, so
+`n_members=10` extends the ensemble only until it contains ten members.
+
 ### Analytic Radius Fitting
 
 For single-object emission retrievals, radius can be removed from the sampled

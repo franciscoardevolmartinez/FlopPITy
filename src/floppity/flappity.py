@@ -620,6 +620,8 @@ class Retrieval:
         output_dir="output_FlopPITy_ensemble",
         member_prefix="member",
         aggregate=True,
+        resume=False,
+        add_members=False,
         **run_kwargs,
     ):
         """Run the same retrieval several times and aggregate file outputs.
@@ -627,7 +629,8 @@ class Retrieval:
         The first ensemble member generates the prior simulations with
         ``save_data=True``. Later members reuse that first round through
         ``reuse_prior`` so stochastic posterior training is repeated without
-        recomputing the prior grid.
+        recomputing the prior grid. When ``resume=True``, existing member
+        directories are preserved and new members are appended.
         """
         n_members = int(n_members)
         if n_members <= 0:
@@ -640,32 +643,55 @@ class Retrieval:
         if n_rounds <= 0:
             raise ValueError("run_ensemble requires n_rounds > 0.")
 
-        member_dirs = []
-        prior_round_path = None
-        for member_index in range(n_members):
+        existing_member_dirs = self._ensemble_member_dirs(output_dir, member_prefix)
+        if existing_member_dirs and not resume:
+            raise FileExistsError(
+                f"Ensemble output {output_dir!r} already contains member "
+                "directories. Use resume=True to add members or choose a new "
+                "output_dir."
+            )
+
+        start_number, stop_number = self._ensemble_member_number_range(
+            n_members=n_members,
+            existing_member_dirs=existing_member_dirs,
+            resume=resume,
+            add_members=add_members,
+            member_prefix=member_prefix,
+        )
+        prior_round_path = self._ensemble_prior_round_path(
+            output_dir=output_dir,
+            member_prefix=member_prefix,
+            existing_member_dirs=existing_member_dirs,
+            start_number=start_number,
+        )
+        new_member_dirs = []
+        for member_number in range(start_number, stop_number + 1):
             member_dir = os.path.join(
                 output_dir,
-                f"{member_prefix}_{member_index + 1:03d}",
+                f"{member_prefix}_{member_number:03d}",
             )
-            member_dirs.append(member_dir)
+            new_member_dirs.append(member_dir)
             member = self._fresh_ensemble_member()
             member_kwargs = self._ensemble_member_run_kwargs(
                 run_kwargs=run_kwargs,
                 member_dir=member_dir,
-                member_index=member_index,
+                reuse_prior=member_number > 1,
                 prior_round_path=prior_round_path,
             )
 
-            print(f"Starting ensemble member {member_index + 1}/{n_members}")
+            print(f"Starting ensemble member {member_number}")
             member.run(**member_kwargs)
-            if member_index == 0:
+            if member_number == 1:
                 prior_round_path = RetrievalOutput(member_dir).round_data_path(0)
 
+        member_dirs = self._ensemble_member_dirs(output_dir, member_prefix)
         summary = {
-            "n_members": n_members,
+            "n_members": len(member_dirs),
+            "new_members": new_member_dirs,
             "output_dir": output_dir,
             "member_dirs": member_dirs,
             "reuse_prior": prior_round_path,
+            "resume": resume,
             "aggregated": {},
         }
         if aggregate:
@@ -947,17 +973,89 @@ class Retrieval:
         member.completed_rounds = 0
         return member
 
+    def _ensemble_member_dirs(self, output_dir, member_prefix):
+        paths = []
+        prefix = f"{member_prefix}_"
+        if not os.path.exists(output_dir):
+            return paths
+        for name in os.listdir(output_dir):
+            path = os.path.join(output_dir, name)
+            if not os.path.isdir(path) or not name.startswith(prefix):
+                continue
+            if self._ensemble_member_number(path, member_prefix) is not None:
+                paths.append(path)
+        return sorted(
+            paths,
+            key=lambda path: self._ensemble_member_number(path, member_prefix),
+        )
+
+    @staticmethod
+    def _ensemble_member_number(member_dir, member_prefix):
+        name = os.path.basename(os.fspath(member_dir))
+        prefix = f"{member_prefix}_"
+        if not name.startswith(prefix):
+            return None
+        try:
+            return int(name[len(prefix):])
+        except ValueError:
+            return None
+
+    def _ensemble_member_number_range(
+        self,
+        n_members,
+        existing_member_dirs,
+        resume,
+        add_members,
+        member_prefix,
+    ):
+        if not existing_member_dirs:
+            return 1, n_members
+
+        last_member = max(
+            self._ensemble_member_number(path, member_prefix)
+            for path in existing_member_dirs
+        )
+        if add_members:
+            return last_member + 1, last_member + n_members
+        if n_members <= len(existing_member_dirs):
+            return last_member + 1, last_member
+        return last_member + 1, n_members
+
+    def _ensemble_prior_round_path(
+        self,
+        output_dir,
+        member_prefix,
+        existing_member_dirs,
+        start_number,
+    ):
+        if start_number == 1:
+            return None
+
+        first_member = os.path.join(output_dir, f"{member_prefix}_001")
+        prior_round_path = RetrievalOutput(first_member).round_data_path(0)
+        if not os.path.exists(prior_round_path):
+            raise FileNotFoundError(
+                "Cannot add ensemble members because the original prior round "
+                f"was not found: {prior_round_path}"
+            )
+        if not existing_member_dirs:
+            raise FileNotFoundError(
+                "Cannot start a resumed ensemble after member 1 without existing "
+                "member directories."
+            )
+        return prior_round_path
+
     def _ensemble_member_run_kwargs(
         self,
         run_kwargs,
         member_dir,
-        member_index,
+        reuse_prior,
         prior_round_path,
     ):
         member_kwargs = copy.deepcopy(run_kwargs)
         member_kwargs["output_dir"] = member_dir
         member_kwargs["resume"] = False
-        if member_index > 0:
+        if reuse_prior:
             member_kwargs["reuse_prior"] = prior_round_path
 
         simulator_kwargs = copy.deepcopy(member_kwargs.get("simulator_kwargs", {}))
@@ -1059,7 +1157,7 @@ class Retrieval:
 
     def _aggregate_ensemble_atmospheres(self, aggregate_dir, member_dirs, round_index):
         contents = []
-        for member_index, member_dir in enumerate(member_dirs):
+        for fallback_index, member_dir in enumerate(member_dirs, start=1):
             path = os.path.join(
                 member_dir,
                 "arcis_outputs",
@@ -1069,8 +1167,12 @@ class Retrieval:
             if not os.path.exists(path):
                 continue
             with open(path) as file:
+                member_number = (
+                    self._ensemble_member_number(member_dir, "member")
+                    or fallback_index
+                )
                 contents.append(
-                    f"# ensemble_member={member_index + 1} source={path}\n"
+                    f"# ensemble_member={member_number} source={path}\n"
                     + file.read().rstrip()
                     + "\n"
                 )

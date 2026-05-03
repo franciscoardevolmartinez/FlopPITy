@@ -1519,6 +1519,76 @@ class TestHelpers(unittest.TestCase):
         self.assertIn("ensemble_member=2", atmosphere)
         self.assertEqual(len(summary["aggregated"]["posterior_samples"]), 2)
 
+    def test_run_ensemble_can_append_members(self):
+        import tempfile
+        import os
+
+        calls = []
+
+        def fake_run(member, **kwargs):
+            calls.append(kwargs)
+            output = RetrievalOutput(kwargs["output_dir"])
+            sim_output = kwargs["simulator_kwargs"]["output_dir"]
+            atmosphere_dir = os.path.join(sim_output, "arcis_files")
+            os.makedirs(atmosphere_dir, exist_ok=True)
+            output.write_round_data(
+                round_index=0,
+                thetas=np.full((2, 1), len(calls)),
+                nat_thetas=np.full((2, 1), 10 + len(calls)),
+                spectra={"obs1": np.full((2, 2), len(calls))},
+                sample_sources=np.array(["prior", "proposal"]),
+            )
+            output.write_posterior_samples(1, np.full((3, 1), len(calls)), ["level"])
+            with open(os.path.join(atmosphere_dir, "mixingratios_round_0.dat"), "w") as file:
+                file.write(f"member={len(calls)}\n")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            retrieval = Retrieval(ARCiS)
+            retrieval.parameters = {
+                "level": {
+                    "min": 0,
+                    "max": 1,
+                    "log": False,
+                    "post_processing": False,
+                    "universal": True,
+                },
+            }
+            with patch.object(Retrieval, "run", fake_run):
+                retrieval.run_ensemble(
+                    n_members=2,
+                    n_rounds=1,
+                    output_dir=tmpdir,
+                    simulator_kwargs={},
+                )
+                summary = retrieval.run_ensemble(
+                    n_members=2,
+                    n_rounds=1,
+                    output_dir=tmpdir,
+                    resume=True,
+                    add_members=True,
+                    simulator_kwargs={},
+                )
+
+            expected_prior = os.path.join(
+                tmpdir,
+                "member_001",
+                "rounds",
+                "round_000",
+                "training_data.npz",
+            )
+            aggregate_samples = np.loadtxt(
+                os.path.join(tmpdir, "aggregated", "posterior_samples_round_1.txt")
+            )
+
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[2]["reuse_prior"], expected_prior)
+        self.assertEqual(calls[3]["reuse_prior"], expected_prior)
+        self.assertTrue(calls[2]["output_dir"].endswith("member_003"))
+        self.assertTrue(calls[3]["output_dir"].endswith("member_004"))
+        self.assertEqual(summary["n_members"], 4)
+        self.assertEqual(len(summary["new_members"]), 2)
+        self.assertEqual(aggregate_samples.shape, (12,))
+
     def test_from_setup_rebuilds_retrieval_and_run_config(self):
         import tempfile
         import os
