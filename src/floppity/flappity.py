@@ -59,7 +59,7 @@ class Retrieval:
         self.parameters = {}
         self.preprocessing = ["log_standardize"]
         self.preprocessing_transformers = {}
-        self.obs_type = obs_type
+        self.obs_type = self._normalize_obs_type(obs_type)
         self.completed_rounds = 0
         self.pca_components = (
             100 if do_pca and pca_components is None else pca_components
@@ -83,6 +83,7 @@ class Retrieval:
     def __setstate__(self, state):
         """Restore a pickled retrieval object."""
         self.__dict__.update(state)
+        self.obs_type = self._normalize_obs_type(getattr(self, "obs_type", "emis"))
         self.completed_rounds = getattr(
             self, "completed_rounds", max(len(getattr(self, "proposals", [])) - 1, 0)
         )
@@ -133,6 +134,22 @@ class Retrieval:
             context="simulator_kwargs",
         )
         return retrieval
+
+    @staticmethod
+    def _normalize_obs_type(obs_type):
+        aliases = {
+            "emis": "emis",
+            "emission": "emis",
+            "trans": "trans",
+            "transmission": "trans",
+        }
+        normalized = aliases.get(str(obs_type).lower())
+        if normalized is None:
+            raise ValueError(
+                "obs_type must be one of 'emis', 'emission', 'trans', or "
+                "'transmission'."
+            )
+        return normalized
 
     @classmethod
     def run_from_setup(
@@ -504,6 +521,7 @@ class Retrieval:
         fit_radius=False,
         radius_bounds=None,
         radius_reference=1.0,
+        save_posterior_samples=False,
     ):
         """
         Run SNPE-C retrieval rounds.
@@ -515,16 +533,7 @@ class Retrieval:
         """
         _ = n_agg
         flow_kwargs = {} if flow_kwargs is None else flow_kwargs
-        training_defaults = {
-            "learning_rate": 1e-3,
-            "stop_after_epochs": 20,
-            "num_atoms": 20,
-        }
-        training_kwargs = (
-            training_defaults
-            if training_kwargs is None
-            else {**training_defaults, **training_kwargs}
-        )
+        training_kwargs = {} if training_kwargs is None else training_kwargs
         simulator_kwargs = {} if simulator_kwargs is None else simulator_kwargs
         simulator_kwargs = self._freeze_arcis_input_for_run(simulator_kwargs)
         n_samples_init = n_samples if n_samples_init is None else n_samples_init
@@ -571,6 +580,7 @@ class Retrieval:
                 "fit_radius": self.fit_radius,
                 "radius_bounds": self.radius_bounds,
                 "radius_reference": self.radius_reference,
+                "save_posterior_samples": save_posterior_samples,
                 "start_round": start_round,
                 "final_round": start_round + n_rounds,
             },
@@ -611,11 +621,12 @@ class Retrieval:
             self.posteriors.append(posterior)
             proposal = self._next_proposal(posterior, alpha)
             self.proposals.append(proposal)
-            self._save_posterior_samples(
-                output_dir=output_dir,
-                posterior=posterior,
-                round_index=round_index,
-            )
+            if save_posterior_samples:
+                self._save_posterior_samples(
+                    output_dir=output_dir,
+                    posterior=posterior,
+                    round_index=round_index,
+                )
             self.completed_rounds = round_index + 1
             self.loss_val = self.inference._summary["best_validation_loss"]
             self._checkpoint(output_dir, "retrieval.pkl")
@@ -921,8 +932,6 @@ class Retrieval:
         return pca is not None and getattr(pca, "fitted", False)
 
     def _next_proposal(self, posterior, alpha):
-        if alpha == 0:
-            return posterior
         return _MixtureProposal(self.prior, posterior, alpha)
 
     def _sample_sources_from_proposal(self, proposal, n_samples):

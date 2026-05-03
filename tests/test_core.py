@@ -1423,11 +1423,33 @@ class TestHelpers(unittest.TestCase):
             cloned_obs_exists = os.path.exists(cloned_obs_path)
 
         self.assertEqual(payload["run"]["n_samples"], 2048)
-        self.assertEqual(payload["run"]["training_kwargs"]["learning_rate"], 1e-3)
-        self.assertEqual(payload["run"]["training_kwargs"]["stop_after_epochs"], 20)
-        self.assertEqual(payload["run"]["training_kwargs"]["num_atoms"], 20)
+        self.assertEqual(payload["run"]["training_kwargs"], {})
+        self.assertFalse(payload["run"]["save_posterior_samples"])
         self.assertTrue(cloned_obs_exists)
         self.assertEqual(payload["observations"]["obs1"]["cloned_source"], cloned_obs_path)
+
+    def test_observation_type_aliases_are_normalized(self):
+        self.assertEqual(Retrieval(lambda obs, pars: {}, obs_type="emission").obs_type, "emis")
+        self.assertEqual(
+            Retrieval(lambda obs, pars: {}, obs_type="transmission").obs_type,
+            "trans",
+        )
+        with self.assertRaises(ValueError):
+            Retrieval(lambda obs, pars: {}, obs_type="unknown")
+
+    def test_alpha_zero_uses_legacy_mixture_proposal_wrapper(self):
+        retrieval = Retrieval(lambda obs, pars: {}, obs_type="trans")
+        retrieval.prior = DummyProposal(0.0)
+        posterior = DummyProposal(1.0)
+
+        proposal = retrieval._next_proposal(posterior, alpha=0)
+        samples = proposal.sample((4,))
+
+        np.testing.assert_array_equal(samples.numpy(), np.ones((4, 1)))
+        np.testing.assert_array_equal(
+            proposal.last_sample_sources,
+            np.array(["proposal", "proposal", "proposal", "proposal"]),
+        )
 
     def test_posterior_samples_are_saved_without_unit_cube_conversion(self):
         import tempfile

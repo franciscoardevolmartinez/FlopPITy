@@ -96,8 +96,8 @@ R = Retrieval(simulator)
 
 `obs_type` can be:
 
-- `"emis"` for emission spectra. This is the default.
-- `"trans"` for transmission spectra.
+- `"emis"` or `"emission"` for emission spectra. This is the default.
+- `"trans"` or `"transmission"` for transmission spectra.
 
 For emission retrievals, non-positive observed and simulated values are clipped
 to `1e-12` before log-style preprocessing can encounter them.
@@ -358,6 +358,7 @@ R.run(
     fit_radius=False,
     radius_bounds=None,
     radius_reference=1.0,
+    save_posterior_samples=False,
 )
 ```
 
@@ -391,6 +392,8 @@ Important options:
   radius fitting.
 - `radius_reference`: reference radius used by the simulator when
   `fit_radius=True`. The default assumes models are generated at `1.0 Rjup`.
+- `save_posterior_samples`: if `True`, draw and save 1000 diagnostic posterior
+  samples after each round.
 - `resume`: continue training from an already trained and loaded retrieval.
 
 ### Sampling Methods
@@ -504,7 +507,8 @@ flow_kwargs = {
 
 ### Training Options
 
-`training_kwargs` are passed to `sbi`'s `.train(...)` method. For example:
+`training_kwargs` are passed directly to `sbi`'s `.train(...)` method. When
+omitted, FlopPITy leaves SBI's own training defaults untouched. For example:
 
 ```python
 training_kwargs = {
@@ -543,8 +547,9 @@ R = Retrieval.load("retrieval.pkl")
   before training that round. FlopPITy keeps only the latest pre-round
   checkpoint and removes older ones.
 - `retrieval.pkl`: state after each successfully completed training round.
-- `posterior_samples_round_<N>.txt`: 1000 natural-unit samples from the
-  trained posterior after round `N`, with parameter names in the header.
+- `posterior_samples_round_<N>.txt`: optional 1000 natural-unit samples from the
+  trained posterior after round `N`, with parameter names in the header. Written
+  when `save_posterior_samples=True`.
 - `observations/`: copies of the observation files passed to `get_obs`, so the
   retrieval output contains the data needed to reproduce the setup.
 - `rounds/round_<NNN>/training_data.npz`: optional per-round training arrays
