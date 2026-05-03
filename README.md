@@ -131,9 +131,13 @@ For stochastic checks, `R.run_ensemble(...)` repeats the same retrieval,
 reuses member 1's prior simulations, and writes aggregated samples/data under
 an `aggregated/` folder.
 
+## Basic troubleshooting
+
+ - It takes a very long time to sample from the posterior. "Only xxx% of samples are accepted, consider changing to MCMC": This probably means that the samples are too dissimilar to the observation. Usual suspects: incorrectly setup model, incorrect priors, or mismatching wavelength axes.
+
 ## Next Steps
 
 - Full guide: [docs/detailed_guide.md](docs/detailed_guide.md)
-- ARCiS example: [examples/ARCiS_retrieval.py](examples/ARCiS_retrieval.py)
+- ARCiS example: [examples/ARCiS_retrieval.ipynb](examples/ARCiS_retrieval.ipynb)
 - Binary ARCiS notebook: [examples/ARCiS_binary_retrieval.ipynb](examples/ARCiS_binary_retrieval.ipynb)
 - Plotting notebook: [examples/plot_retrieval_results.ipynb](examples/plot_retrieval_results.ipynb)

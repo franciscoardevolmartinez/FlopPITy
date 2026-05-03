@@ -4,6 +4,8 @@ from contextlib import redirect_stdout
 from io import StringIO
 import json
 import inspect
+import sys
+import types
 import numpy as np
 import torch
 from torch.distributions import Normal
@@ -730,8 +732,8 @@ class TestHelpers(unittest.TestCase):
         retrieval = Retrieval(wrapped_simulator, obs_type="emis")
         retrieval.obs = obs
         retrieval.parameters = parameters
-        retrieval.thetas = np.array([[0.2, 0.8, 0.1, 0.9]])
-        retrieval.nat_thetas = np.array([[500.0, 1000.0, 3.5, 4.0]])
+        retrieval.thetas = np.array([[500.0, 1000.0, 3.5, 4.0]])
+        retrieval.nat_thetas = retrieval.thetas
 
         retrieval._canonicalize_current_thetas()
 
@@ -741,7 +743,7 @@ class TestHelpers(unittest.TestCase):
         )
         np.testing.assert_array_equal(
             retrieval.thetas,
-            np.array([[0.8, 0.2, 0.9, 0.1]]),
+            np.array([[1000.0, 500.0, 4.0, 3.5]]),
         )
 
     def test_multi_component_wrapper_supports_arbitrary_weighted_components(self):
@@ -829,6 +831,36 @@ class TestHelpers(unittest.TestCase):
             retrieval = Retrieval(lambda obs, pars: {}, obs_type="trans")
             retrieval._prepare_simulator_round_outputs(kwargs)
             self.assertTrue(os.path.exists(output_path))
+
+    def test_arcis_input_is_frozen_once_for_run(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, "arcis.in")
+            arcis_output = os.path.join(tmpdir, "arcis_output")
+            with open(input_path, "w") as file:
+                file.write("makeai=.false.\noriginal=1\n")
+
+            retrieval = Retrieval(ARCiS, obs_type="emis")
+            simulator_kwargs = retrieval._freeze_arcis_input_for_run(
+                {
+                    "input_file": input_path,
+                    "output_dir": arcis_output,
+                }
+            )
+
+            frozen_path = os.path.join(arcis_output, "arcis_files", "arcis.in")
+            with open(input_path, "w") as file:
+                file.write("makeai=.true.\nmodified=1\n")
+            with open(frozen_path) as file:
+                frozen_contents = file.read()
+
+        self.assertEqual(simulator_kwargs["input_file"], frozen_path)
+        self.assertEqual(simulator_kwargs["original_input_file"], input_path)
+        self.assertIn("makeai=.true.", frozen_contents)
+        self.assertIn("original=1", frozen_contents)
+        self.assertNotIn("modified=1", frozen_contents)
 
     def test_psimulator_passes_global_sample_offsets_to_chunks(self):
         def simulator(obs, parameters, thread=0, **kwargs):
@@ -967,6 +999,57 @@ class TestHelpers(unittest.TestCase):
             retrieval.theta_sources,
             np.array(["prior", "prior", "proposal", "proposal"]),
         )
+
+    def test_create_prior_uses_natural_parameter_bounds(self):
+        class FakeBoxUniform:
+            def __init__(self, low, high):
+                self.low = low
+                self.high = high
+
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.parameters = {
+            "temperature": {
+                "min": 500,
+                "max": 2500,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+            "log_h2o": {
+                "min": -12,
+                "max": -1,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+        }
+
+        fake_sbi = types.SimpleNamespace(
+            utils=types.SimpleNamespace(BoxUniform=FakeBoxUniform)
+        )
+        with patch.dict(sys.modules, {"sbi": fake_sbi}):
+            retrieval.create_prior()
+
+        np.testing.assert_allclose(retrieval.prior.low.numpy(), [500, -12])
+        np.testing.assert_allclose(retrieval.prior.high.numpy(), [2500, -1])
+
+    def test_sobol_initial_samples_are_immediately_scaled_to_natural_units(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.parameters = {
+            "level": {
+                "min": 10,
+                "max": 20,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+        }
+
+        retrieval.sobol_thetas(4)
+
+        self.assertTrue(np.all(retrieval.thetas >= 10))
+        self.assertTrue(np.all(retrieval.thetas <= 20))
+        np.testing.assert_array_equal(retrieval.nat_thetas, retrieval.thetas)
 
     def test_resume_state_validation(self):
         retrieval = Retrieval(flat_simulator, obs_type="trans")
@@ -1133,6 +1216,7 @@ class TestHelpers(unittest.TestCase):
             path = RetrievalOutput(tmpdir).write_round_data(
                 round_index=0,
                 thetas=np.array([[0.2], [0.4]]),
+                nat_thetas=np.array([[2.0], [4.0]]),
                 spectra={"obs": np.array([[2.0, 2.0], [4.0, 4.0]])},
             )
             retrieval._load_or_extend_reused_prior(
@@ -1143,8 +1227,8 @@ class TestHelpers(unittest.TestCase):
                 simulator_kwargs={},
             )
 
-        np.testing.assert_array_equal(retrieval.thetas, np.array([[0.2], [0.4]]))
-        np.testing.assert_array_equal(retrieval.nat_thetas, np.array([[2.0], [4.0]]))
+        np.testing.assert_array_equal(retrieval.thetas, np.array([[2.0], [4.0]]))
+        np.testing.assert_array_equal(retrieval.nat_thetas, retrieval.thetas)
         np.testing.assert_array_equal(
             retrieval.x["obs"],
             np.array([[2.0, 2.0], [4.0, 4.0]]),
@@ -1313,7 +1397,7 @@ class TestHelpers(unittest.TestCase):
         self.assertTrue(cloned_obs_exists)
         self.assertEqual(payload["observations"]["obs1"]["cloned_source"], cloned_obs_path)
 
-    def test_posterior_samples_are_saved_in_natural_units(self):
+    def test_posterior_samples_are_saved_without_unit_cube_conversion(self):
         import tempfile
         import os
 
@@ -1341,7 +1425,7 @@ class TestHelpers(unittest.TestCase):
 
         self.assertIn("level", header)
         self.assertEqual(samples.shape, (1000,))
-        np.testing.assert_allclose(samples, np.full(1000, 12.5))
+        np.testing.assert_allclose(samples, np.full(1000, 0.25))
 
     def test_run_ensemble_reuses_prior_and_aggregates_outputs(self):
         import tempfile
