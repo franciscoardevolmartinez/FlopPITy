@@ -19,7 +19,7 @@ from floppity.helpers import (
     reduced_chi_squared,
 )
 from floppity.output import RetrievalOutput
-from floppity.preprocessing import PCATransformer
+from floppity.preprocessing import LogStandardizer, PCATransformer
 from floppity.simulators import (
     ARCiS,
     ARCiS_binary,
@@ -1241,6 +1241,38 @@ class TestHelpers(unittest.TestCase):
 
         self.assertIsInstance(result, torch.Tensor)
         np.testing.assert_array_equal(result.numpy(), np.array([[0.0, 1.0]]))
+
+    def test_default_preprocessing_fits_log10_standardizer_on_models(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        x = torch.tensor([
+            [1.0, 10.0],
+            [10.0, 100.0],
+            [100.0, 1000.0],
+        ])
+
+        transformed = retrieval.do_preprocessing(x, fit_preprocessing=True)
+        default = retrieval.do_preprocessing(np.array([[10.0, 100.0]]))
+
+        self.assertIsInstance(transformed, torch.Tensor)
+        self.assertIsInstance(
+            retrieval.preprocessing_transformers["log_standardize"],
+            LogStandardizer,
+        )
+        np.testing.assert_allclose(
+            retrieval.preprocessing_transformers["log_standardize"].mean_,
+            np.array([[1.0, 2.0]]),
+        )
+        np.testing.assert_allclose(
+            retrieval.preprocessing_transformers["log_standardize"].std_,
+            np.array([[1.0, 1.0]]),
+        )
+        np.testing.assert_allclose(default, np.array([[0.0, 0.0]]))
+
+    def test_log_standardize_requires_training_fit_before_observation(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+
+        with self.assertRaises(RuntimeError):
+            retrieval.do_preprocessing(np.array([[10.0, 100.0]]))
 
     def test_pca_transformer_reduces_arrays_and_tensors(self):
         x = np.array([

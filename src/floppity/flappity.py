@@ -57,7 +57,8 @@ class Retrieval:
         """
         self.simulator = simulator
         self.parameters = {}
-        self.preprocessing = None
+        self.preprocessing = ["log_standardize"]
+        self.preprocessing_transformers = {}
         self.obs_type = obs_type
         self.completed_rounds = 0
         self.pca_components = (
@@ -88,6 +89,9 @@ class Retrieval:
         self.pca_components = getattr(self, "pca_components", None)
         self.pca = getattr(self, "pca", None)
         self.do_pca = getattr(self, "do_pca", self.pca_components is not None)
+        self.preprocessing_transformers = getattr(
+            self, "preprocessing_transformers", {}
+        )
 
     @classmethod
     def load(cls, fname):
@@ -597,6 +601,7 @@ class Retrieval:
 
             x_norm_tensor = self.do_preprocessing(
                 x_tensor,
+                fit_preprocessing=round_index == 0 and not resume,
                 fit_pca=self._pca_enabled() and not self._pca_is_fitted(),
             )
             self.train(theta_tensor, x_norm_tensor, proposal, **training_kwargs)
@@ -1459,10 +1464,24 @@ class Retrieval:
             )
             self.noisy_x[key] = self.augmented_x[key] + noise
 
-    def do_preprocessing(self, x, fit_pca=False):
+    def do_preprocessing(self, x, fit_preprocessing=False, fit_pca=False):
         """Apply configured preprocessing and optional fitted PCA."""
         xnorm = x
         for function_name in self.preprocessing or []:
+            if function_name == "log_standardize":
+                transformer = self.preprocessing_transformers.get(function_name)
+                if fit_preprocessing:
+                    transformer = preprocessing.LogStandardizer()
+                    transformer.fit(xnorm)
+                    self.preprocessing_transformers[function_name] = transformer
+                if transformer is None:
+                    raise RuntimeError(
+                        "log_standardize preprocessing must be fitted on training "
+                        "spectra before it can transform observations."
+                    )
+                xnorm = transformer.transform(xnorm)
+                continue
+
             preprocessing_fun = getattr(preprocessing, function_name)
             if isinstance(xnorm, torch.Tensor):
                 xnorm = preprocessing_fun(xnorm.cpu().numpy())

@@ -1,6 +1,60 @@
 import numpy as np
 
 
+class LogStandardizer:
+    """Fit log10 column-wise standardization and apply it consistently."""
+
+    def __init__(self, eps=1e-20):
+        self.eps = eps
+        self.mean_ = None
+        self.std_ = None
+
+    @property
+    def fitted(self):
+        return self.mean_ is not None and self.std_ is not None
+
+    def fit(self, x):
+        x_array = self._log10_array(x)
+        self.mean_ = np.mean(x_array, axis=0, keepdims=True)
+        ddof = 1 if x_array.shape[0] > 1 else 0
+        self.std_ = np.std(x_array, axis=0, ddof=ddof, keepdims=True)
+        self.std_ = np.clip(self.std_, 1e-12, None)
+        return self
+
+    def transform(self, x):
+        if not self.fitted:
+            raise RuntimeError("LogStandardizer must be fitted before transform.")
+        transformed = (self._log10_array(x) - self.mean_) / self.std_
+        return self._like_input(transformed, x)
+
+    def fit_transform(self, x):
+        return self.fit(x).transform(x)
+
+    def _log10_array(self, x):
+        x_array = self._as_numpy(x)
+        if np.any(x_array <= 0):
+            x_array = np.clip(x_array, self.eps, None)
+        return np.log10(x_array)
+
+    @staticmethod
+    def _as_numpy(x):
+        if hasattr(x, "detach"):
+            return x.detach().cpu().numpy()
+        return np.asarray(x)
+
+    @staticmethod
+    def _like_input(x_array, original):
+        if hasattr(original, "detach"):
+            import torch
+
+            return torch.as_tensor(
+                x_array,
+                dtype=original.dtype,
+                device=original.device,
+            )
+        return x_array
+
+
 class PCATransformer:
     """Small PCA transformer for 2D retrieval spectra."""
 

@@ -626,7 +626,19 @@ the setup log that no longer exist so you can edit the JSON or pass overrides.
 
 ## Preprocessing
 
-Set `R.preprocessing` to a list of preprocessing function names before running:
+By default, FlopPITy uses the legacy fitted preprocessing:
+
+```python
+R.preprocessing = ["log_standardize"]
+```
+
+This fits a column-wise mean and standard deviation on the first round of
+simulated training spectra after applying `log10`, then applies that same fitted
+transform to all later simulated spectra and to the default observation used for
+posterior conditioning.
+
+You can override `R.preprocessing` with a list of preprocessing function names
+before running:
 
 ```python
 R.preprocessing = ["log", "standardize_1v1"]
@@ -636,12 +648,15 @@ Available preprocessing functions:
 
 - `softclip`: soft-clips values with `x / (1 + abs(x / 100))`.
 - `log`: applies `log10`; all values must be positive.
+- `log_standardize`: applies `log10`, fits column-wise mean/std on first-round
+  simulated spectra, and reuses that transform for models and observations.
 - `standardize_1v1`: standardizes each spectrum independently and appends that
   row's mean and standard deviation.
 - `standardize_global`: column-wise standardization.
 
-Preprocessing is applied to simulated training spectra and the default
-observation used for posterior conditioning.
+Preprocessing is applied to both simulated training spectra and the default
+observation used for posterior conditioning. Fitted preprocessing steps are fit
+only on simulated training spectra, never on the observed data.
 
 ### PCA Compression
 
