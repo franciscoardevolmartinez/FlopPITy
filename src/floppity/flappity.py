@@ -1604,8 +1604,8 @@ class Retrieval:
         for key in self.obs:
             noise = (
                 self.error_inflation
-                * self.obs[key][:, 2]
-                * np.random.standard_normal(len(self.obs[key][:, 1]))
+                * self.obs[key][:, 2][None, :]
+                * np.random.standard_normal(self.augmented_x[key].shape)
             )
             self.noisy_x[key] = self.augmented_x[key] + noise
 

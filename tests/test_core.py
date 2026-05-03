@@ -971,7 +971,12 @@ class TestHelpers(unittest.TestCase):
         }
         retrieval.prior = DummyProposal(0.8)
 
-        with patch("numpy.random.standard_normal", return_value=np.array([1.0, -1.0])):
+        noise_draws = np.array([
+            [1.0, -1.0],
+            [0.0, 0.5],
+            [-0.5, 1.0],
+        ])
+        with patch("numpy.random.standard_normal", return_value=noise_draws) as normal:
             _, x_tensor = retrieval.generate_training_data(
                 proposal=DummyProposal(0.8),
                 r=0,
@@ -984,7 +989,12 @@ class TestHelpers(unittest.TestCase):
                 initial_round=True,
             )
 
-        expected = np.array([[1.0, 0.4], [1.0, 0.4], [1.0, 0.4]])
+        normal.assert_called_once_with((3, 2))
+        expected = np.array([
+            [1.0, 0.4],
+            [0.8, 1.0],
+            [0.7, 1.2],
+        ])
         np.testing.assert_allclose(x_tensor.numpy(), expected)
 
     def test_run_fits_preprocessing_only_on_first_fresh_round_training_x(self):
