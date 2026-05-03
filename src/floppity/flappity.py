@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import cloudpickle as pickle
 import numpy as np
 import torch
-from scipy.stats.qmc import LatinHypercube, Sobol
+from scipy.stats.qmc import Sobol
 from tqdm import tqdm
 
 from floppity import helpers
@@ -332,7 +332,7 @@ class Retrieval:
         post_process=False,
         universal=True,
     ):
-        """Add one retrieval parameter and its unit-cube transform metadata."""
+        """Add one retrieval parameter and its prior bounds."""
         self.parameters[parname] = {
             "min": min_value,
             "max": max_value,
@@ -342,27 +342,20 @@ class Retrieval:
         }
 
     def get_thetas(self, proposal, n_samples):
-        """Sample unit-cube parameters from ``proposal``."""
+        """Sample natural-parameter values from ``proposal``."""
         self.n_samples = n_samples
         thetas = proposal.sample((self.n_samples,))
         self.thetas = thetas.cpu().detach().numpy().reshape(-1, len(self.parameters))
-        self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+        self.nat_thetas = self.thetas
         self.theta_sources = self._sample_sources_from_proposal(proposal, self.n_samples)
 
-    def lhs_thetas(self, n_samples):
-        """Generate Latin hypercube samples in the unit cube."""
-        self.n_samples = n_samples
-        sampler = LatinHypercube(d=len(self.parameters), optimization="random-cd")
-        self.thetas = sampler.random(n=n_samples)
-        self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
-        self.theta_sources = self._sample_sources("prior", self.n_samples)
-
     def sobol_thetas(self, n_samples):
-        """Generate Sobol samples in the unit cube."""
+        """Generate Sobol prior samples and immediately scale to natural units."""
         self.n_samples = n_samples
         sampler = Sobol(d=len(self.parameters), optimization="random-cd")
-        self.thetas = sampler.random(n=n_samples)
-        self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+        unit_thetas = sampler.random(n=n_samples)
+        self.thetas = helpers.convert_cube(unit_thetas, self.parameters)
+        self.nat_thetas = self.thetas
         self.theta_sources = self._sample_sources("prior", self.n_samples)
 
     def get_x(self, x):
@@ -373,12 +366,18 @@ class Retrieval:
         }
 
     def create_prior(self):
-        """Construct a uniform unit-cube prior."""
+        """Construct a uniform prior in natural parameter units."""
         from sbi import utils as sbi_utils
 
+        low = []
+        high = []
+        for metadata in self.parameters.values():
+            low.append(metadata["min"])
+            high.append(metadata["max"])
+
         self.prior = sbi_utils.BoxUniform(
-            low=torch.zeros(len(self.parameters)),
-            high=torch.ones(len(self.parameters)),
+            low=torch.as_tensor(low, dtype=torch.float32),
+            high=torch.as_tensor(high, dtype=torch.float32),
         )
 
     def density_builder(
@@ -850,7 +849,6 @@ class Retrieval:
             self._output_manager(output_dir).write_round_data(
                 round_index=round_index,
                 thetas=self.thetas,
-                nat_thetas=getattr(self, "nat_thetas", None),
                 spectra=self.x,
                 sample_sources=getattr(self, "theta_sources", None),
                 processed_spectra=getattr(self, "post_x", None),
@@ -891,7 +889,7 @@ class Retrieval:
 
         reused_n = min(len(prior_data["par"]), n_samples)
         remaining_n = n_samples - reused_n
-        reused_thetas = prior_data["par"][:reused_n]
+        reused_thetas = prior_data.get("nat_par", prior_data["par"])[:reused_n]
         reused_sources = prior_data.get(
             "sample_sources",
             self._sample_sources("prior", len(prior_data["par"])),
@@ -922,7 +920,7 @@ class Retrieval:
 
         self.thetas = all_thetas
         self.theta_sources = all_sources
-        self.nat_thetas = helpers.convert_cube(self.thetas, self.parameters)
+        self.nat_thetas = self.thetas
         self._canonicalize_current_thetas()
         self.n_samples = all_thetas.shape[0]
         self.get_x(all_x)
@@ -930,8 +928,6 @@ class Retrieval:
     def _sample_initial_thetas(self, method, n_samples):
         if method == "random":
             self.get_thetas(self.prior, n_samples)
-        elif method == "lhs":
-            self.lhs_thetas(n_samples)
         elif method == "sobol":
             sobol_n = self._nearest_power_of_two(n_samples)
             if sobol_n != n_samples:
@@ -943,7 +939,7 @@ class Retrieval:
             self.sobol_thetas(sobol_n)
         else:
             raise ValueError(
-                "sample_prior_method must be one of 'random', 'lhs', or 'sobol'."
+                "sample_prior_method must be one of 'random' or 'sobol'."
             )
 
     @staticmethod
@@ -1036,10 +1032,9 @@ class Retrieval:
         if isinstance(samples, torch.Tensor):
             samples = samples.detach().cpu().numpy()
         samples = np.asarray(samples)
-        natural_samples = helpers.convert_cube(samples, self.parameters)
         self._output_manager(output_dir).write_posterior_samples(
             round_index=round_index + 1,
-            samples=natural_samples,
+            samples=samples,
             parameter_names=self.parameters.keys(),
         )
 
@@ -1356,7 +1351,7 @@ class Retrieval:
 
         samples = self.proposals[proposal_id].sample((n_samples,)).detach().numpy()
         fig = corner(
-            helpers.convert_cube(samples, self.parameters),
+            samples,
             labels=list(self.parameters.keys()),
             **CORNER_KWARGS,
         )

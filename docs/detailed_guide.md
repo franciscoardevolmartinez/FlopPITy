@@ -104,8 +104,9 @@ to `1e-12` before log-style preprocessing can encounter them.
 
 ### Parameters
 
-Each retrieved parameter is sampled in the unit cube and converted to physical
-values using the bounds you provide.
+Each retrieved parameter is sampled, trained, and stored in the natural units
+defined by the bounds you provide. If a parameter should be represented in log
+space, define the parameter itself in log space, for example `log_h2o`.
 
 ```python
 R.add_parameter("temperature", 500, 2500)
@@ -127,7 +128,7 @@ R.add_parameter(
 
 Current notes:
 
-- `min_value` and `max_value` define the linear unit-cube transform.
+- `min_value` and `max_value` define the uniform prior bounds in natural units.
 - `log_scale` is stored as metadata. If you need log-space sampling today, pass
   log-space bounds yourself.
 - `post_process=True` marks a parameter as belonging to a post-processing
@@ -373,8 +374,7 @@ Important options:
 - `output_dir`: checkpoint, setup log, and optional data output directory.
 - `save_data`: if `True`, writes per-round compressed NumPy archives at
   `rounds/round_<NNN>/training_data.npz`.
-- `sample_prior_method`: one of `"sobol"`, `"lhs"`, or `"random"` for the
-  initial round.
+- `sample_prior_method`: one of `"sobol"` or `"random"` for the initial round.
 - `reuse_prior`: path to previous saved training data to reuse initial prior
   simulations. New outputs use `rounds/round_<NNN>/training_data.npz`; legacy
   `data_<round>.pkl` files are still readable.
@@ -397,10 +397,11 @@ Important options:
 
 The initial round can be sampled with:
 
-- `"sobol"`: low-discrepancy Sobol samples. The sample count is rounded to the
-  nearest power of two because Sobol sequences require it.
-- `"lhs"`: Latin hypercube sampling.
-- `"random"`: samples from the unit-cube prior.
+- `"sobol"`: low-discrepancy Sobol samples. Sobol points are generated in
+  `[0, 1]^D` and immediately scaled to natural parameter units before SBI sees
+  them. The sample count is rounded to the nearest power of two because Sobol
+  sequences require it.
+- `"random"`: samples from the natural-unit uniform prior.
 
 Later rounds always sample from the latest posterior proposal.
 
@@ -505,10 +506,10 @@ R = Retrieval.load("retrieval.pkl")
 - `observations/`: copies of the observation files passed to `get_obs`, so the
   retrieval output contains the data needed to reproduce the setup.
 - `rounds/round_<NNN>/training_data.npz`: optional per-round training arrays
-  written when `save_data=True`. These archives store the sampled unit-cube
-  parameters, natural parameters when available, raw simulator spectra,
-  post-processed spectra, and per-sample source labels (`prior` or `proposal`)
-  while preserving observation keys such as `obs1` or `miri`.
+  written when `save_data=True`. These archives store the sampled natural-unit
+  parameters, raw simulator spectra, post-processed spectra, and per-sample
+  source labels (`prior` or `proposal`) while preserving observation keys such
+  as `obs1` or `miri`.
 
 Pickle is still used for retrieval checkpoints because those contain trained
 Python and `sbi` objects. Array-heavy training data is written as `.npz`, which
@@ -724,11 +725,8 @@ fig = R.plot_corner(proposal_id=-1, n_samples=5000)
 Draw posterior samples directly:
 
 ```python
-samples_unit_cube = R.proposals[-1].sample((5000,))
-samples_physical = helpers.convert_cube(
-    samples_unit_cube.detach().numpy(),
-    R.parameters,
-)
+samples = R.proposals[-1].sample((5000,))
+samples = samples.detach().numpy()
 ```
 
 Find a MAP estimate from a proposal:
@@ -744,7 +742,8 @@ map_estimate = find_MAP(R.proposals[-1])
 `floppity.helpers` includes:
 
 - `create_obs_file(wvl, spectrum, error, *extras)`: create an observation array.
-- `convert_cube(thetas, pars)`: convert unit-cube samples to physical values.
+- `convert_cube(thetas, pars)`: convert unit-cube samples to natural values;
+  this is mostly useful for external Sobol-style designs.
 - `compute_moments(distribution)`: estimate moments from a PyTorch distribution.
 - `find_MAP(proposal)`: call `proposal.map(...)` with FlopPITy's defaults.
 - `reduced_chi_squared(obs_dict, sim_dict, n_params=0)`: compute reduced

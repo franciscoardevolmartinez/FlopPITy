@@ -4,6 +4,8 @@ from contextlib import redirect_stdout
 from io import StringIO
 import json
 import inspect
+import sys
+import types
 import numpy as np
 import torch
 from torch.distributions import Normal
@@ -730,8 +732,8 @@ class TestHelpers(unittest.TestCase):
         retrieval = Retrieval(wrapped_simulator, obs_type="emis")
         retrieval.obs = obs
         retrieval.parameters = parameters
-        retrieval.thetas = np.array([[0.2, 0.8, 0.1, 0.9]])
-        retrieval.nat_thetas = np.array([[500.0, 1000.0, 3.5, 4.0]])
+        retrieval.thetas = np.array([[500.0, 1000.0, 3.5, 4.0]])
+        retrieval.nat_thetas = retrieval.thetas
 
         retrieval._canonicalize_current_thetas()
 
@@ -741,7 +743,7 @@ class TestHelpers(unittest.TestCase):
         )
         np.testing.assert_array_equal(
             retrieval.thetas,
-            np.array([[0.8, 0.2, 0.9, 0.1]]),
+            np.array([[1000.0, 500.0, 4.0, 3.5]]),
         )
 
     def test_multi_component_wrapper_supports_arbitrary_weighted_components(self):
@@ -998,6 +1000,57 @@ class TestHelpers(unittest.TestCase):
             np.array(["prior", "prior", "proposal", "proposal"]),
         )
 
+    def test_create_prior_uses_natural_parameter_bounds(self):
+        class FakeBoxUniform:
+            def __init__(self, low, high):
+                self.low = low
+                self.high = high
+
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.parameters = {
+            "temperature": {
+                "min": 500,
+                "max": 2500,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+            "log_h2o": {
+                "min": -12,
+                "max": -1,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+        }
+
+        fake_sbi = types.SimpleNamespace(
+            utils=types.SimpleNamespace(BoxUniform=FakeBoxUniform)
+        )
+        with patch.dict(sys.modules, {"sbi": fake_sbi}):
+            retrieval.create_prior()
+
+        np.testing.assert_allclose(retrieval.prior.low.numpy(), [500, -12])
+        np.testing.assert_allclose(retrieval.prior.high.numpy(), [2500, -1])
+
+    def test_sobol_initial_samples_are_immediately_scaled_to_natural_units(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.parameters = {
+            "level": {
+                "min": 10,
+                "max": 20,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+        }
+
+        retrieval.sobol_thetas(4)
+
+        self.assertTrue(np.all(retrieval.thetas >= 10))
+        self.assertTrue(np.all(retrieval.thetas <= 20))
+        np.testing.assert_array_equal(retrieval.nat_thetas, retrieval.thetas)
+
     def test_resume_state_validation(self):
         retrieval = Retrieval(flat_simulator, obs_type="trans")
         with self.assertRaises(RuntimeError):
@@ -1163,6 +1216,7 @@ class TestHelpers(unittest.TestCase):
             path = RetrievalOutput(tmpdir).write_round_data(
                 round_index=0,
                 thetas=np.array([[0.2], [0.4]]),
+                nat_thetas=np.array([[2.0], [4.0]]),
                 spectra={"obs": np.array([[2.0, 2.0], [4.0, 4.0]])},
             )
             retrieval._load_or_extend_reused_prior(
@@ -1173,8 +1227,8 @@ class TestHelpers(unittest.TestCase):
                 simulator_kwargs={},
             )
 
-        np.testing.assert_array_equal(retrieval.thetas, np.array([[0.2], [0.4]]))
-        np.testing.assert_array_equal(retrieval.nat_thetas, np.array([[2.0], [4.0]]))
+        np.testing.assert_array_equal(retrieval.thetas, np.array([[2.0], [4.0]]))
+        np.testing.assert_array_equal(retrieval.nat_thetas, retrieval.thetas)
         np.testing.assert_array_equal(
             retrieval.x["obs"],
             np.array([[2.0, 2.0], [4.0, 4.0]]),
@@ -1343,7 +1397,7 @@ class TestHelpers(unittest.TestCase):
         self.assertTrue(cloned_obs_exists)
         self.assertEqual(payload["observations"]["obs1"]["cloned_source"], cloned_obs_path)
 
-    def test_posterior_samples_are_saved_in_natural_units(self):
+    def test_posterior_samples_are_saved_without_unit_cube_conversion(self):
         import tempfile
         import os
 
@@ -1371,7 +1425,7 @@ class TestHelpers(unittest.TestCase):
 
         self.assertIn("level", header)
         self.assertEqual(samples.shape, (1000,))
-        np.testing.assert_allclose(samples, np.full(1000, 12.5))
+        np.testing.assert_allclose(samples, np.full(1000, 0.25))
 
     def test_from_setup_rebuilds_retrieval_and_run_config(self):
         import tempfile
