@@ -1532,19 +1532,16 @@ class TestHelpers(unittest.TestCase):
         with self.assertRaises(ValueError):
             Retrieval(lambda obs, pars: {}, obs_type="unknown")
 
-    def test_alpha_zero_uses_legacy_mixture_proposal_wrapper(self):
+    def test_alpha_is_currently_ignored_for_next_proposal(self):
         retrieval = Retrieval(lambda obs, pars: {}, obs_type="trans")
         retrieval.prior = DummyProposal(0.0)
         posterior = DummyProposal(1.0)
 
-        proposal = retrieval._next_proposal(posterior, alpha=0)
+        proposal = retrieval._next_proposal(posterior, alpha=0.5)
         samples = proposal.sample((4,))
 
+        self.assertIs(proposal, posterior)
         np.testing.assert_array_equal(samples.numpy(), np.ones((4, 1)))
-        np.testing.assert_array_equal(
-            proposal.last_sample_sources,
-            np.array(["proposal", "proposal", "proposal", "proposal"]),
-        )
 
     def test_posterior_samples_are_saved_without_unit_cube_conversion(self):
         import tempfile

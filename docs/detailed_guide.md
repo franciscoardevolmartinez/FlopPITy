@@ -380,9 +380,8 @@ Important options:
 - `reuse_prior`: path to previous saved training data to reuse initial prior
   simulations. New outputs use `rounds/round_<NNN>/training_data.npz`; legacy
   `data_<round>.pkl` files are still readable.
-- `alpha`: posterior inflation fraction. If `alpha > 0`, later rounds sample
-  an `alpha` fraction of parameters from the prior and `1 - alpha` from the
-  latest uninflated posterior proposal.
+- `alpha`: currently ignored. Later rounds sample from the latest posterior
+  proposal directly while posterior inflation is parked for debugging.
 - `pca_components`: optional number of PCA components to train on the
   preprocessed spectra before they are passed to the neural density estimator.
 - `fit_radius`: optional analytic radius fitting for emission spectra. When

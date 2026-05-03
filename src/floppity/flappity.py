@@ -539,7 +539,6 @@ class Retrieval:
         save_sbi_data = save_data if save_sbi_data is None else bool(save_sbi_data)
         simulator_kwargs = self._freeze_arcis_input_for_run(simulator_kwargs)
         n_samples_init = n_samples if n_samples_init is None else n_samples_init
-        self._validate_alpha(alpha)
         self._configure_radius_fit(
             fit_radius=fit_radius,
             radius_bounds=radius_bounds,
@@ -999,7 +998,8 @@ class Retrieval:
         return pca is not None and getattr(pca, "fitted", False)
 
     def _next_proposal(self, posterior, alpha):
-        return _MixtureProposal(self.prior, posterior, alpha)
+        _ = alpha
+        return posterior
 
     def _sample_sources_from_proposal(self, proposal, n_samples):
         if hasattr(proposal, "last_sample_sources"):
