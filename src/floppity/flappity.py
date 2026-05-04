@@ -354,6 +354,18 @@ class Retrieval:
         universal=True,
     ):
         """Add one retrieval parameter and its prior bounds."""
+        if min_value == max_value:
+            raise ValueError(
+                f"Parameter {parname!r} has identical min/max bounds: {min_value}."
+            )
+        if min_value > max_value:
+            warnings.warn(
+                f"Parameter {parname!r} has min_value > max_value "
+                f"({min_value:g} > {max_value:g}); swapping the bounds.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            min_value, max_value = max_value, min_value
         self.parameters[parname] = {
             "min": min_value,
             "max": max_value,

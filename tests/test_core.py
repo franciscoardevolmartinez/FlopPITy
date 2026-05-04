@@ -347,6 +347,37 @@ class TestHelpers(unittest.TestCase):
         self.assertIn("temperature", pars)
         self.assertEqual(obs, {"obs1": "prism.dat", "obs2": "miri.dat"})
 
+    def test_read_ARCiS_input_swaps_reversed_fit_bounds(self):
+        import tempfile
+        import os
+
+        contents = """
+        fitpar:keyword="cloud1:kappa"
+        fitpar:min=1d2
+        fitpar:max=1d-6
+        fitpar:log=.true.
+        """
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, "arcis.in")
+            with open(input_path, "w") as file:
+                file.write(contents)
+
+            with self.assertWarnsRegex(RuntimeWarning, "min > max"):
+                pars, _ = read_ARCiS_input(input_path)
+
+        self.assertEqual(pars["cloud1:kappa"]["min"], -6)
+        self.assertEqual(pars["cloud1:kappa"]["max"], 2)
+
+    def test_add_parameter_swaps_reversed_bounds(self):
+        retrieval = Retrieval(lambda obs, pars: {})
+
+        with self.assertWarnsRegex(RuntimeWarning, "min_value > max_value"):
+            retrieval.add_parameter("cloud", 100.0, 1e-6, log_scale=True)
+
+        self.assertEqual(retrieval.parameters["cloud"]["min"], 1e-6)
+        self.assertEqual(retrieval.parameters["cloud"]["max"], 100.0)
+
     def test_arcis_atmosphere_structure_appender(self):
         import tempfile
         import os

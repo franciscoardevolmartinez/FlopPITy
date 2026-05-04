@@ -6,6 +6,7 @@ from tqdm import trange, tqdm
 import subprocess
 import fcntl
 import shutil
+import warnings
 from copy import deepcopy
 
 def mock_simulator(obs, pars, thread=0):
@@ -108,6 +109,7 @@ def read_ARCiS_input(input_path):
             log_flag = clean_in[i+3].strip() == 'fitpar:log=.true.'
             if log_flag:
                 lower, upper = np.log10(lower), np.log10(upper)
+            lower, upper = _ordered_fit_bounds(param_name, lower, upper)
 
             # Store parameter metadata
             par_dict[param_name] = {
@@ -133,6 +135,23 @@ def read_ARCiS_input(input_path):
             obsn += 1
 
     return par_dict, obs_dict
+
+
+def _ordered_fit_bounds(parameter_name, lower, upper):
+    """Return increasing prior bounds, warning when an input file reverses them."""
+    if lower == upper:
+        raise ValueError(
+            f"Fit parameter {parameter_name!r} has identical min/max bounds: {lower}."
+        )
+    if lower > upper:
+        warnings.warn(
+            f"Fit parameter {parameter_name!r} has min > max ({lower:g} > "
+            f"{upper:g}); swapping the bounds.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return upper, lower
+    return lower, upper
 
 def ARCiS(obs, parameters, thread=0, **kwargs):
     """
