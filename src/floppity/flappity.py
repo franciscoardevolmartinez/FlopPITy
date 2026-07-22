@@ -64,8 +64,9 @@ class Retrieval:
             code.
         fit_residuals : bool, optional
             Train SBI on ``simulation - observation`` and condition on a zero
-            residual instead of training on simulations directly. Signed
-            residuals are incompatible with log-based preprocessing.
+            residual instead of training on simulations directly. With
+            ``preprocessing=["log_residual"]``, train on the log-flux ratio
+            ``log10(simulation) - log10(observation)`` instead.
         emission_flux_floor : float, optional
             Positive floor used for non-positive emission fluxes before
             log-style preprocessing. Defaults to a tiny value to avoid
@@ -1633,7 +1634,7 @@ class Retrieval:
         return np.concatenate(list(obs.values()), axis=0)[:, 1]
 
     def _sbi_training_x(self, x):
-        """Return simulations or raw simulation-minus-observation residuals."""
+        """Return simulations or configured residual features for SBI."""
         if not self.fit_residuals:
             return x
         observation = torch.as_tensor(
@@ -1641,6 +1642,15 @@ class Retrieval:
             dtype=x.dtype,
             device=x.device,
         )
+        if "log_residual" in (self.preprocessing or []):
+            floor = torch.as_tensor(
+                self.emission_flux_floor,
+                dtype=x.dtype,
+                device=x.device,
+            )
+            return torch.log10(torch.clamp(x, min=floor)) - torch.log10(
+                torch.clamp(observation, min=floor)
+            )
         return x - observation
 
     def _sbi_default_x(self):
@@ -1650,10 +1660,15 @@ class Retrieval:
         return self.default_obs
 
     def _validate_residual_preprocessing(self):
+        configured = self.preprocessing or []
+        if "log_residual" in configured and not self.fit_residuals:
+            raise ValueError(
+                "log_residual preprocessing requires fit_residuals=True."
+            )
         if not self.fit_residuals:
             return
         log_preprocessing = {
-            name for name in (self.preprocessing or []) if name in {"log", "log_standardize"}
+            name for name in configured if name in {"log", "log_standardize"}
         }
         if log_preprocessing:
             names = ", ".join(sorted(log_preprocessing))
@@ -1683,6 +1698,10 @@ class Retrieval:
         """Apply configured preprocessing and optional fitted PCA."""
         xnorm = x
         for function_name in self.preprocessing or []:
+            if function_name == "log_residual":
+                # Residual construction needs both model and observation and is
+                # therefore handled by _sbi_training_x before this generic chain.
+                continue
             if function_name == "log_standardize":
                 transformer = self.preprocessing_transformers.get(function_name)
                 if fit_preprocessing:
