@@ -148,6 +148,36 @@ class TestHelpers(unittest.TestCase):
         retrieval.preprocessing = []
         retrieval._validate_residual_preprocessing()
 
+    def test_log_residual_mode_uses_clipped_log_flux_ratio(self):
+        retrieval = Retrieval(
+            lambda obs, pars: {},
+            obs_type="emis",
+            fit_residuals=True,
+            emission_flux_floor=1e-6,
+        )
+        retrieval.preprocessing = ["log_residual"]
+        retrieval.default_obs = np.array([[10.0, 1e-8]])
+        simulations = torch.tensor([[100.0, -1.0], [1.0, 1e-4]])
+
+        residuals = retrieval._sbi_training_x(simulations)
+
+        np.testing.assert_allclose(
+            residuals.numpy(),
+            np.array([[1.0, 0.0], [-1.0, 2.0]]),
+            atol=1e-6,
+        )
+        np.testing.assert_array_equal(
+            retrieval.do_preprocessing(retrieval._sbi_default_x()),
+            np.zeros((1, 2)),
+        )
+
+    def test_log_residual_requires_residual_mode(self):
+        retrieval = Retrieval(lambda obs, pars: {})
+        retrieval.preprocessing = ["log_residual"]
+
+        with self.assertRaisesRegex(ValueError, "fit_residuals=True"):
+            retrieval._validate_residual_preprocessing()
+
     def test_reduced_chi_squared(self):
         obs_dict = {
             "obs1": np.array([[1, 10, 0.1], [2, 20, 0.2], [3, 30, 0.3]])

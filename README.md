@@ -79,6 +79,17 @@ Residuals are signed, so this mode cannot be combined with `log` or
 `log_standardize` preprocessing. Use no preprocessing or a transformation that
 supports signed values.
 
+For positive emission spectra spanning a large dynamic range, log residuals
+are usually preferable:
+
+```python
+R = Retrieval(simulator, obs_type="emis", fit_residuals=True)
+R.preprocessing = ["log_residual"]
+```
+
+This trains on `log10(simulation) - log10(observation)` and conditions on zero.
+Both arrays are clipped to `emission_flux_floor` before taking the logarithm.
+
 ## Multiple Observations
 
 ```python
@@ -148,9 +159,9 @@ R.run(simulator_kwargs=PICASO_kwargs)
 ```
 
 For PICASO simulation fitting, plain `log` preprocessing is recommended over
-the default `log_standardize`. To use residual fitting instead, construct the
-retrieval with `fit_residuals=True` and use `R.preprocessing = []`, because raw
-residuals can be negative.
+the default `log_standardize`. For PICASO residual fitting, use
+`fit_residuals=True` with `R.preprocessing = ["log_residual"]`. Raw residuals
+remain available with `R.preprocessing = []`.
 
 PICASO is imported lazily, so it is not a required FlopPITy dependency unless
 you use this simulator. `read_PICASO_input` writes temporary FlopPITy
