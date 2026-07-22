@@ -49,6 +49,326 @@ def mock_simulator(obs, pars, thread=0):
             x[key][i]=gaussian(wvl, c[i], s[i], a[i])
     return x
 
+
+def _load_toml(path):
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
+        import tomli as tomllib
+
+    with open(path, "rb") as file:
+        return tomllib.load(file)
+
+
+def _infer_picaso_refdata():
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("picaso")
+    except (ImportError, ValueError):
+        return None
+    if spec is None or spec.origin is None:
+        return None
+
+    package_path = os.path.abspath(spec.origin)
+    candidate = os.path.join(os.path.dirname(os.path.dirname(package_path)), "reference")
+    if os.path.exists(candidate):
+        return candidate
+    return None
+
+
+def _normalize_picaso_repo_path(picaso_repo):
+    """Return the sys.path entry that makes ``import picaso`` work.
+
+    PICASO checkouts are often nested as ``PICASO/picaso/picaso``. Accept
+    either the outer working directory or the inner repository directory.
+    """
+    repo = os.path.abspath(os.fspath(picaso_repo))
+    candidates = [repo, os.path.join(repo, "picaso"), os.path.dirname(repo)]
+    for candidate in candidates:
+        if os.path.exists(os.path.join(candidate, "picaso", "__init__.py")):
+            return candidate
+    return repo
+
+
+def _import_picaso_driver(picaso_repo=None, pysyn_cdbs=None):
+    if picaso_repo is not None:
+        repo = _normalize_picaso_repo_path(picaso_repo)
+        if repo not in sys.path:
+            sys.path.insert(0, repo)
+        os.environ.setdefault("picaso_refdata", os.path.join(repo, "reference"))
+    else:
+        inferred_refdata = _infer_picaso_refdata()
+        if inferred_refdata is not None:
+            os.environ.setdefault("picaso_refdata", inferred_refdata)
+    if pysyn_cdbs is not None:
+        os.environ["PYSYN_CDBS"] = os.fspath(pysyn_cdbs)
+    else:
+        os.environ.setdefault("PYSYN_CDBS", "")
+
+    try:
+        import picaso.driver as go
+    except ImportError as exc:
+        raise ImportError(
+            "PICASO support requires picaso to be importable. Install PICASO "
+            "or pass picaso_repo=/path/to/Picaso when calling read_PICASO_input "
+            "and PICASO."
+        ) from exc
+    return go
+
+
+def _import_picaso_runtime(picaso_repo=None, pysyn_cdbs=None):
+    go = _import_picaso_driver(picaso_repo=picaso_repo, pysyn_cdbs=pysyn_cdbs)
+    try:
+        from picaso.parameterizations import Parameterize
+        from picaso.justdoit import opannection
+    except ImportError as exc:
+        raise ImportError(
+            "PICASO support requires picaso.parameterizations and "
+            "picaso.justdoit to be importable."
+        ) from exc
+    return go, Parameterize, opannection
+
+
+def _picaso_prior_bounds(meta):
+    if "uniform_kwargs" not in meta:
+        raise ValueError(
+            "Only PICASO uniform priors are currently supported by "
+            "read_PICASO_input. Missing uniform_kwargs."
+        )
+    kwargs = meta["uniform_kwargs"]
+    return float(kwargs["min"]), float(kwargs["max"])
+
+
+def _is_picaso_log_prior(meta):
+    return bool(meta.get("log", False))
+
+
+def _is_picaso_error_inflation(name):
+    return name.startswith("err_inf.")
+
+
+def _is_picaso_postprocess(name):
+    return name.startswith("scaling.") or name.startswith("offset.")
+
+
+def _picaso_postprocess_name(name):
+    kind, obs_key = name.split(".", 1)
+    return f"{kind}:{obs_key}"
+
+
+def _picaso_parameter_entry(meta, post_processing=False):
+    lower, upper = _picaso_prior_bounds(meta)
+    lower, upper = _ordered_fit_bounds("PICASO parameter", lower, upper)
+    return {
+        "min": lower,
+        "max": upper,
+        "log": _is_picaso_log_prior(meta),
+        "post_processing": post_processing,
+        "universal": not post_processing,
+    }
+
+
+def _picaso_simulator_fitpars(fitpars):
+    return {
+        name: meta
+        for name, meta in fitpars.items()
+        if not _is_picaso_error_inflation(name)
+        and not _is_picaso_postprocess(name)
+    }
+
+
+def _picaso_to_physical_parameters(parameters, fitpars):
+    physical = np.array(parameters, dtype=float, copy=True)
+    for i, (_, meta) in enumerate(fitpars.items()):
+        if _is_picaso_log_prior(meta):
+            physical[:, i] = 10**physical[:, i]
+    return physical
+
+
+def read_PICASO_input(
+    input_path=None,
+    picaso_repo=None,
+    observation_dir=None,
+    pysyn_cdbs=None,
+    input_file=None,
+):
+    """Read a PICASO retrieval TOML into FlopPITy parameters and observations.
+
+    Parameters
+    ----------
+    input_path, input_file : str or path-like
+        PICASO TOML file. ``input_file`` is accepted as an alias so the same
+        kwargs can be passed to :func:`read_PICASO_input` and :func:`PICASO`.
+    picaso_repo : str or path-like, optional
+        Path to a PICASO checkout. Use this when PICASO is not installed in the
+        active environment but is available from source.
+    pysyn_cdbs : str or path-like, optional
+        Path to the synphot reference data. If omitted, an empty value is set
+        when needed so PICASO can emit its normal missing-reference warning
+        instead of failing on import.
+    observation_dir : str or path-like, optional
+        Directory where temporary FlopPITy observation text files are written.
+        Defaults to ``[InputOutput].retrieval_output`` when that key is present
+        in the TOML.
+    Returns
+    -------
+    par_dict : dict
+        FlopPITy parameter metadata. PICASO log priors are kept in log-space
+        bounds and converted back to physical values by :func:`PICASO`.
+    obs_dict : dict
+        Mapping from PICASO observation keys to temporary text files containing
+        ``wavenumber_cm-1, flux, error``. The error column is the data-file
+        error only; PICASO error-inflation priors are ignored.
+    """
+    if input_path is None:
+        input_path = input_file
+    elif input_file is not None and os.fspath(input_path) != os.fspath(input_file):
+        raise ValueError("Pass either input_path or input_file, not both.")
+    if input_path is None:
+        raise ValueError("read_PICASO_input requires input_path or input_file.")
+
+    input_path = os.fspath(input_path)
+    go = _import_picaso_driver(picaso_repo=picaso_repo, pysyn_cdbs=pysyn_cdbs)
+    config = _load_toml(input_path)
+    fitpars = go.prior_finder(config["retrieval"])
+
+    par_dict = {}
+    postprocess = {}
+    for name, meta in fitpars.items():
+        if _is_picaso_error_inflation(name):
+            continue
+        if _is_picaso_postprocess(name):
+            postprocess[_picaso_postprocess_name(name)] = _picaso_parameter_entry(
+                meta,
+                post_processing=True,
+            )
+        else:
+            par_dict[name] = _picaso_parameter_entry(meta, post_processing=False)
+    par_dict.update(postprocess)
+
+    data_dict, _ = go.get_data(config)
+    if observation_dir is None:
+        retrieval_output = config.get("InputOutput", {}).get("retrieval_output")
+        if retrieval_output is None:
+            observation_dir = os.path.join(
+                os.path.dirname(input_path),
+                "floppity_observations",
+            )
+        else:
+            observation_dir = retrieval_output
+    observation_dir = os.fspath(observation_dir)
+    os.makedirs(observation_dir, exist_ok=True)
+
+    obs_dict = {}
+    for obs_key, (x_wno, y, err) in data_dict.items():
+        arr = np.column_stack([x_wno, y, err])
+        obs_path = os.path.join(observation_dir, f"{obs_key}.txt")
+        np.savetxt(obs_path, arr, header="wavenumber_cm-1 observed_value uncertainty")
+        obs_dict[obs_key] = obs_path
+
+    return par_dict, obs_dict
+
+
+_PICASO_CACHE = {}
+
+
+def _picaso_runtime(input_file, picaso_repo=None, pysyn_cdbs=None):
+    normalized_repo = (
+        None if picaso_repo is None else _normalize_picaso_repo_path(picaso_repo)
+    )
+    key = (
+        os.path.abspath(os.fspath(input_file)),
+        normalized_repo,
+        None
+        if pysyn_cdbs is None
+        else os.path.abspath(os.fspath(pysyn_cdbs)),
+    )
+    cached = _PICASO_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    go, Parameterize, opannection = _import_picaso_runtime(
+        picaso_repo=normalized_repo,
+        pysyn_cdbs=pysyn_cdbs,
+    )
+    config = _load_toml(input_file)
+    preload_cloud_miefs = go.find_values_for_key(config, "condensate")
+    virga_mieff = config["OpticalProperties"].get("virga_mieff", None)
+    param_tools = Parameterize(
+        load_cld_optical=preload_cloud_miefs,
+        mieff_dir=virga_mieff,
+    )
+    opa = opannection(
+        filename_db=config["OpticalProperties"]["opacity_file"],
+        method=config["OpticalProperties"]["opacity_method"],
+        **config["OpticalProperties"].get("opacity_kwargs", {}),
+    )
+    data_dict, conv_dict = go.get_data(config)
+    fitpars = _picaso_simulator_fitpars(go.prior_finder(config["retrieval"]))
+    cached = (go, config, opa, param_tools, data_dict, conv_dict, fitpars)
+    _PICASO_CACHE[key] = cached
+    return cached
+
+
+def PICASO(obs, parameters, thread=0, **kwargs):
+    """Run PICASO models for FlopPITy.
+
+    Use with :func:`read_PICASO_input`::
+
+        from floppity import Retrieval
+        from floppity.simulators import read_PICASO_input, PICASO
+
+        picaso_kwargs = {"input_file": "input.toml", "picaso_repo": "/path/to/picaso"}
+        # Optionally add "pysyn_cdbs": "/path/to/trds" if PICASO needs it.
+        parameters, observations = read_PICASO_input(**picaso_kwargs)
+        R = Retrieval(PICASO, obs_type="emis")
+        R.get_obs(observations)
+        R.parameters = parameters
+        R.run(simulator_kwargs=picaso_kwargs)
+
+    PICASO is imported lazily, so FlopPITy does not require PICASO unless this
+    simulator is used.
+    """
+    if "input_file" not in kwargs:
+        raise ValueError("PICASO simulator requires input_file='path/to/input.toml'.")
+
+    picaso_repo = kwargs.get("picaso_repo")
+    pysyn_cdbs = kwargs.get("pysyn_cdbs")
+    go, base_config, opa, param_tools, _data_dict, conv_dict, fitpars = _picaso_runtime(
+        kwargs["input_file"],
+        picaso_repo=picaso_repo,
+        pysyn_cdbs=pysyn_cdbs,
+    )
+
+    parameters = np.atleast_2d(np.asarray(parameters, dtype=float))
+    physical_parameters = _picaso_to_physical_parameters(parameters, fitpars)
+    model_data = {
+        key: [np.asarray(value)[:, 0], np.asarray(value)[:, 1], np.asarray(value)[:, 2]]
+        for key, value in obs.items()
+    }
+
+    spectra, _masks = go.MODEL(
+        physical_parameters,
+        fitpars,
+        deepcopy(base_config),
+        opa,
+        param_tools,
+        model_data,
+        retrieval=True,
+        CONV_DICT=conv_dict,
+    )
+
+    for key in spectra:
+        spectra[key] = np.nan_to_num(
+            spectra[key],
+            nan=1e-300,
+            neginf=1e-300,
+            posinf=1e300,
+        )
+    return spectra
+
+
 def read_ARCiS_input(input_path):
     """
     Parses an ARCiS input file and extracts model parameter specifications

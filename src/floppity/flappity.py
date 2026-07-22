@@ -37,7 +37,15 @@ TRANSIENT_STATE = {
 class Retrieval:
     """Simulation-based atmospheric retrieval driver."""
 
-    def __init__(self, simulator, obs_type="emis", pca_components=None, do_pca=False):
+    def __init__(
+        self,
+        simulator,
+        obs_type="emis",
+        pca_components=None,
+        do_pca=False,
+        fit_residuals=False,
+        emission_flux_floor=1e-30,
+    ):
         """
         Parameters
         ----------
@@ -54,12 +62,22 @@ class Retrieval:
         do_pca : bool, optional
             Legacy switch for enabling PCA. Prefer ``pca_components`` for new
             code.
+        fit_residuals : bool, optional
+            Train SBI on ``simulation - observation`` and condition on a zero
+            residual instead of training on simulations directly. Signed
+            residuals are incompatible with log-based preprocessing.
+        emission_flux_floor : float, optional
+            Positive floor used for non-positive emission fluxes before
+            log-style preprocessing. Defaults to a tiny value to avoid
+            changing small-flux spectra appreciably.
         """
         self.simulator = simulator
         self.parameters = {}
         self.preprocessing = ["log_standardize"]
         self.preprocessing_transformers = {}
         self.obs_type = self._normalize_obs_type(obs_type)
+        self.fit_residuals = bool(fit_residuals)
+        self.emission_flux_floor = float(emission_flux_floor)
         self.completed_rounds = 0
         self.pca_components = (
             100 if do_pca and pca_components is None else pca_components
@@ -93,6 +111,10 @@ class Retrieval:
         self.preprocessing_transformers = getattr(
             self, "preprocessing_transformers", {}
         )
+        self.fit_residuals = bool(getattr(self, "fit_residuals", False))
+        self.emission_flux_floor = float(
+            getattr(self, "emission_flux_floor", 1e-30)
+        )
 
     @classmethod
     def load(cls, fname):
@@ -116,6 +138,7 @@ class Retrieval:
             simulator,
             obs_type=setup.get("retrieval", {}).get("obs_type") or "emis",
             pca_components=setup.get("retrieval", {}).get("pca_components"),
+            fit_residuals=setup.get("retrieval", {}).get("fit_residuals", False),
         )
         retrieval.setup_payload = setup
         retrieval.setup_path = os.fspath(setup_path)
@@ -303,7 +326,7 @@ class Retrieval:
 
         if self.obs_type == "emis":
             for obs in self.obs.values():
-                obs[obs <= 0] = 1e-12
+                obs[:, 1] = np.maximum(obs[:, 1], self.emission_flux_floor)
 
         self.default_obs = self._concat_obs_values(self.obs).reshape(1, -1)
 
@@ -452,7 +475,7 @@ class Retrieval:
 
     def get_posterior(self):
         """Build the posterior and cache the preprocessed default observation."""
-        self.default_obs_norm = self.do_preprocessing(self.default_obs)
+        self.default_obs_norm = self.do_preprocessing(self._sbi_default_x())
         self.posterior = self.inference.build_posterior(self.posterior_estimator)
 
     def generate_training_data(
@@ -561,6 +584,7 @@ class Retrieval:
             n_pca=n_pca,
             resume=resume,
         )
+        self._validate_residual_preprocessing()
 
         self.n_threads = n_threads
         self.alpha = alpha
@@ -623,12 +647,13 @@ class Retrieval:
             self.output.cleanup_pre_round_checkpoints(keep_filename=pre_round_checkpoint)
             self._save_round_data(output_dir, save_data, round_index)
 
+            sbi_x_tensor = self._sbi_training_x(x_tensor)
             x_norm_tensor = self.do_preprocessing(
-                x_tensor,
+                sbi_x_tensor,
                 fit_preprocessing=round_index == 0 and not resume,
                 fit_pca=self._pca_enabled() and not self._pca_is_fitted(),
             )
-            self.default_obs_norm = self.do_preprocessing(self.default_obs)
+            self.default_obs_norm = self.do_preprocessing(self._sbi_default_x())
             self._save_sbi_data(
                 output_dir,
                 save_sbi_data,
@@ -809,6 +834,7 @@ class Retrieval:
                 "obs_type": self.obs_type,
                 "simulator": self._callable_name(self.simulator),
                 "preprocessing": self.preprocessing,
+                "fit_residuals": self.fit_residuals,
                 "pca_components": getattr(self, "pca_components", None),
                 "pca_fitted": self._pca_is_fitted(),
                 "fit_radius": getattr(self, "fit_radius", False),
@@ -1010,7 +1036,8 @@ class Retrieval:
         return pca is not None and getattr(pca, "fitted", False)
 
     def _next_proposal(self, posterior, alpha):
-        _ = alpha
+        if alpha > 0:
+            return _MixtureProposal(self.prior, posterior, alpha)
         return posterior
 
     def _sample_sources_from_proposal(self, proposal, n_samples):
@@ -1605,10 +1632,41 @@ class Retrieval:
     def _concat_obs_values(obs):
         return np.concatenate(list(obs.values()), axis=0)[:, 1]
 
+    def _sbi_training_x(self, x):
+        """Return simulations or raw simulation-minus-observation residuals."""
+        if not self.fit_residuals:
+            return x
+        observation = torch.as_tensor(
+            self.default_obs,
+            dtype=x.dtype,
+            device=x.device,
+        )
+        return x - observation
+
+    def _sbi_default_x(self):
+        """Return the feature value on which the posterior is conditioned."""
+        if self.fit_residuals:
+            return np.zeros_like(self.default_obs)
+        return self.default_obs
+
+    def _validate_residual_preprocessing(self):
+        if not self.fit_residuals:
+            return
+        log_preprocessing = {
+            name for name in (self.preprocessing or []) if name in {"log", "log_standardize"}
+        }
+        if log_preprocessing:
+            names = ", ".join(sorted(log_preprocessing))
+            raise ValueError(
+                "fit_residuals=True produces signed simulation-observation "
+                f"residuals and cannot be combined with {names} preprocessing. "
+                "Use preprocessing=[] or a signed-data transformation."
+            )
+
     def _clip_emission_arrays(self, arrays):
         if self.obs_type == "emis":
             for value in arrays.values():
-                value[value <= 0] = 1e-12
+                value[value <= 0] = self.emission_flux_floor
 
     def add_noise(self):
         """Add Gaussian noise to the augmented spectra."""

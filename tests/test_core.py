@@ -24,6 +24,7 @@ from floppity.simulators import (
     ARCiS,
     ARCiS_binary,
     ARCiS_multiple,
+    PICASO,
     _arcis_atmosphere_columns,
     _arcis_atmosphere_numeric_contents,
     _append_arcis_atmosphere_structure,
@@ -33,6 +34,7 @@ from floppity.simulators import (
     make_multi_component_parameters,
     make_multi_component_simulator,
     read_ARCiS_input,
+    read_PICASO_input,
 )
 
 class DummyProposal:
@@ -101,6 +103,7 @@ class TestHelpers(unittest.TestCase):
     def test_retrieval_defaults_match_quickstart_settings(self):
         retrieval = Retrieval(lambda obs, pars: {})
         self.assertEqual(retrieval.obs_type, "emis")
+        self.assertFalse(retrieval.fit_residuals)
 
         run_signature = inspect.signature(Retrieval.run)
         self.assertEqual(run_signature.parameters["n_samples"].default, 2048)
@@ -113,6 +116,37 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(density_signature.parameters["blocks"].default, 2)
         self.assertEqual(density_signature.parameters["hidden"].default, 64)
         self.assertEqual(density_signature.parameters["dropout"].default, 0.05)
+
+    def test_residual_mode_subtracts_observation_and_targets_zero(self):
+        retrieval = Retrieval(
+            lambda obs, pars: {},
+            obs_type="trans",
+            fit_residuals=True,
+        )
+        retrieval.default_obs = np.array([[10.0, 20.0]])
+        simulations = torch.tensor([[11.0, 18.0], [9.0, 25.0]])
+
+        residuals = retrieval._sbi_training_x(simulations)
+
+        np.testing.assert_allclose(
+            residuals.numpy(),
+            np.array([[1.0, -2.0], [-1.0, 5.0]]),
+        )
+        np.testing.assert_array_equal(
+            retrieval._sbi_default_x(),
+            np.zeros((1, 2)),
+        )
+
+    def test_residual_mode_rejects_log_preprocessing(self):
+        retrieval = Retrieval(lambda obs, pars: {}, fit_residuals=True)
+
+        for preprocessing_name in ("log", "log_standardize"):
+            retrieval.preprocessing = [preprocessing_name]
+            with self.assertRaisesRegex(ValueError, "signed"):
+                retrieval._validate_residual_preprocessing()
+
+        retrieval.preprocessing = []
+        retrieval._validate_residual_preprocessing()
 
     def test_reduced_chi_squared(self):
         obs_dict = {
@@ -368,6 +402,190 @@ class TestHelpers(unittest.TestCase):
 
         self.assertEqual(pars["cloud1:kappa"]["min"], -6)
         self.assertEqual(pars["cloud1:kappa"]["max"], 2)
+
+
+    def test_read_PICASO_input_writes_data_errors_and_skips_err_inf(self):
+        import tempfile
+        import os
+        import collections
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = os.path.join(tmpdir, "picaso_output")
+            input_path = os.path.join(tmpdir, "input.toml")
+            with open(input_path, "w") as file:
+                file.write(
+                    """
+[InputOutput]
+retrieval_output = "{output_dir}"
+
+[ObservationData]
+filenames = ["fake.nc"]
+coord = "wavelength"
+coord_unit = "um"
+data = "flux"
+error = "flux_error"
+
+[OpticalProperties]
+opacity_file = "fake.db"
+opacity_method = "resampled"
+opacity_kwargs = {{}}
+
+[retrieval]
+[retrieval.chemistry.free.H2O.value]
+prior = "uniform"
+uniform_kwargs = {{min = -6, max = -4}}
+log = true
+
+[retrieval.err_inf.prism]
+prior = "uniform"
+uniform_kwargs = {{min = -40, max = -38}}
+log = true
+
+[retrieval.scaling.miri]
+prior = "uniform"
+uniform_kwargs = {{min = 0.9, max = 1.1}}
+log = false
+""".format(output_dir=output_dir)
+                )
+
+            fake_driver = types.ModuleType("picaso.driver")
+            fake_driver.prior_finder = lambda retrieval: collections.OrderedDict([
+                (
+                    "chemistry.free.H2O.value",
+                    {"uniform_kwargs": {"min": -6, "max": -4}, "log": True},
+                ),
+                (
+                    "err_inf.prism",
+                    {"uniform_kwargs": {"min": -40, "max": -38}, "log": True},
+                ),
+                (
+                    "scaling.miri",
+                    {"uniform_kwargs": {"min": 0.9, "max": 1.1}, "log": False},
+                ),
+            ])
+            fake_driver.get_data = lambda config: (
+                {
+                    "prism": [
+                        np.array([1.0, 2.0]),
+                        np.array([10.0, 20.0]),
+                        np.array([0.1, 0.2]),
+                    ]
+                },
+                {"prism": (None, None)},
+            )
+
+            with patch.dict(
+                sys.modules,
+                {"picaso": types.ModuleType("picaso"), "picaso.driver": fake_driver},
+            ):
+                pars, obs = read_PICASO_input(input_path)
+
+            self.assertIn("chemistry.free.H2O.value", pars)
+            self.assertNotIn("err_inf.prism", pars)
+            self.assertIn("scaling:miri", pars)
+            self.assertTrue(pars["scaling:miri"]["post_processing"])
+            self.assertEqual(obs["prism"], os.path.join(output_dir, "prism.txt"))
+            loaded = np.loadtxt(obs["prism"])
+            np.testing.assert_allclose(loaded[:, 2], [0.1, 0.2])
+
+    def test_PICASO_simulator_converts_log_priors_and_uses_conv_dict(self):
+        import tempfile
+        import os
+        import collections
+
+        calls = {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = os.path.join(tmpdir, "input.toml")
+            with open(input_path, "w") as file:
+                file.write(
+                    """
+[InputOutput]
+retrieval_output = "{tmpdir}"
+
+[ObservationData]
+filenames = ["fake.nc"]
+
+[OpticalProperties]
+opacity_file = "fake.db"
+opacity_method = "resampled"
+opacity_kwargs = {{}}
+
+[retrieval]
+[retrieval.chemistry.free.H2O.value]
+prior = "uniform"
+uniform_kwargs = {{min = -6, max = -4}}
+log = true
+
+[retrieval.scaling.prism]
+prior = "uniform"
+uniform_kwargs = {{min = 0.9, max = 1.1}}
+log = false
+""".format(tmpdir=tmpdir)
+                )
+
+            fake_driver = types.ModuleType("picaso.driver")
+            fake_driver.find_values_for_key = lambda config, key: []
+            fake_driver.prior_finder = lambda retrieval: collections.OrderedDict([
+                (
+                    "chemistry.free.H2O.value",
+                    {"uniform_kwargs": {"min": -6, "max": -4}, "log": True},
+                ),
+                (
+                    "scaling.prism",
+                    {"uniform_kwargs": {"min": 0.9, "max": 1.1}, "log": False},
+                ),
+            ])
+            fake_driver.get_data = lambda config: (
+                {
+                    "prism": [
+                        np.array([1.0, 2.0]),
+                        np.array([10.0, 20.0]),
+                        np.array([0.1, 0.2]),
+                    ]
+                },
+                {"prism": ("resolution", "edges")},
+            )
+
+            def fake_model(
+                cube,
+                fitpars,
+                config,
+                opa,
+                param_tools,
+                data_dict,
+                retrieval=True,
+                CONV_DICT=None,
+            ):
+                calls["cube"] = cube.copy()
+                calls["fitpars"] = list(fitpars)
+                calls["conv"] = CONV_DICT
+                return (
+                    {"prism": np.ones((cube.shape[0], 2))},
+                    {"prism": np.zeros((cube.shape[0], 2), dtype=bool)},
+                )
+
+            fake_driver.MODEL = fake_model
+
+            fake_parameterizations = types.ModuleType("picaso.parameterizations")
+            fake_parameterizations.Parameterize = lambda **kwargs: {"param_tools": kwargs}
+            fake_justdoit = types.ModuleType("picaso.justdoit")
+            fake_justdoit.opannection = lambda **kwargs: {"opa": kwargs}
+
+            modules = {
+                "picaso": types.ModuleType("picaso"),
+                "picaso.driver": fake_driver,
+                "picaso.parameterizations": fake_parameterizations,
+                "picaso.justdoit": fake_justdoit,
+            }
+            obs = {"prism": np.array([[1.0, 10.0, 0.1], [2.0, 20.0, 0.2]])}
+            with patch.dict(sys.modules, modules):
+                spectra = PICASO(obs, np.array([[-5.0]]), input_file=input_path)
+
+        self.assertEqual(calls["fitpars"], ["chemistry.free.H2O.value"])
+        np.testing.assert_allclose(calls["cube"], [[1e-5]])
+        self.assertEqual(calls["conv"], {"prism": ("resolution", "edges")})
+        np.testing.assert_allclose(spectra["prism"], np.ones((1, 2)))
 
     def test_add_parameter_swaps_reversed_bounds(self):
         retrieval = Retrieval(lambda obs, pars: {})
@@ -1463,11 +1681,13 @@ class TestHelpers(unittest.TestCase):
             retrieval = Retrieval(flat_simulator, obs_type="emis")
             retrieval.get_obs([obs_path])
 
-        self.assertEqual(retrieval.obs[0][0, 1], 1e-12)
+        self.assertEqual(retrieval.obs[0][0, 1], 1e-30)
+        self.assertEqual(retrieval.obs[0][0, 0], 1.0)
+        self.assertEqual(retrieval.obs[0][0, 2], 0.1)
 
         arrays = {"obs": np.array([[-1.0, 0.0, 1.0]])}
         retrieval._clip_emission_arrays(arrays)
-        np.testing.assert_array_equal(arrays["obs"], np.array([[1e-12, 1e-12, 1.0]]))
+        np.testing.assert_array_equal(arrays["obs"], np.array([[1e-30, 1e-30, 1.0]]))
 
     def test_nearest_power_of_two_rejects_non_positive_samples(self):
         retrieval = Retrieval(flat_simulator, obs_type="trans")
@@ -1563,7 +1783,7 @@ class TestHelpers(unittest.TestCase):
         with self.assertRaises(ValueError):
             Retrieval(lambda obs, pars: {}, obs_type="unknown")
 
-    def test_alpha_is_currently_ignored_for_next_proposal(self):
+    def test_alpha_inflates_next_proposal_with_prior_mixture(self):
         retrieval = Retrieval(lambda obs, pars: {}, obs_type="trans")
         retrieval.prior = DummyProposal(0.0)
         posterior = DummyProposal(1.0)
@@ -1571,8 +1791,24 @@ class TestHelpers(unittest.TestCase):
         proposal = retrieval._next_proposal(posterior, alpha=0.5)
         samples = proposal.sample((4,))
 
+        self.assertIsNot(proposal, posterior)
+        np.testing.assert_array_equal(
+            samples.numpy(),
+            np.array([[0.0], [0.0], [1.0], [1.0]], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            proposal.last_sample_sources,
+            np.array(["prior", "prior", "proposal", "proposal"]),
+        )
+
+    def test_zero_alpha_next_proposal_uses_posterior_directly(self):
+        retrieval = Retrieval(lambda obs, pars: {}, obs_type="trans")
+        retrieval.prior = DummyProposal(0.0)
+        posterior = DummyProposal(1.0)
+
+        proposal = retrieval._next_proposal(posterior, alpha=0)
+
         self.assertIs(proposal, posterior)
-        np.testing.assert_array_equal(samples.numpy(), np.ones((4, 1)))
 
     def test_posterior_samples_are_saved_without_unit_cube_conversion(self):
         import tempfile
