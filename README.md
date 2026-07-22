@@ -65,6 +65,20 @@ That is the core FlopPITy workflow:
 3. Add parameters with `add_parameter`.
 4. Run with `run`.
 
+To train SBI on residuals instead of the simulated spectra, construct the
+retrieval with `fit_residuals=True`. FlopPITy then uses
+`simulation - observation` as the training feature and conditions the posterior
+on a zero residual:
+
+```python
+R = Retrieval(simulator, fit_residuals=True)
+R.preprocessing = []
+```
+
+Residuals are signed, so this mode cannot be combined with `log` or
+`log_standardize` preprocessing. Use no preprocessing or a transformation that
+supports signed values.
+
 ## Multiple Observations
 
 ```python
@@ -98,13 +112,55 @@ ARCiS_kwargs = dict(
     output_dir = 'path/to/ARCiS/output',
 )
 
-parameters, observations = read_ARCiS_input(ARCiS_kwargs[input_file])
+parameters, observations = read_ARCiS_input(ARCiS_kwargs['input_file'])
 
 R.get_obs(observations)
 R.parameters = parameters
 
 R.run(simulator_kwargs=ARCiS_kwargs)
 ```
+
+
+## Retrieval with PICASO
+
+FlopPITy also comes with a PICASO wrapper that can import the observations and
+parameters from a PICASO retrieval TOML. The workflow mirrors the ARCiS wrapper:
+
+```python
+from floppity import Retrieval
+from floppity.simulators import read_PICASO_input, PICASO
+
+R = Retrieval(PICASO, obs_type='emis')
+R.preprocessing = ['log']
+
+PICASO_kwargs = dict(
+    input_file='path/to/PICASO/input.toml',
+    picaso_repo='path/to/PICASO',  # optional if picaso is importable
+    # pysyn_cdbs='path/to/trds',   # optional if PICASO needs synphot refs
+)
+
+parameters, observations = read_PICASO_input(**PICASO_kwargs)
+
+R.get_obs(observations)
+R.parameters = parameters
+
+R.run(simulator_kwargs=PICASO_kwargs)
+```
+
+For PICASO simulation fitting, plain `log` preprocessing is recommended over
+the default `log_standardize`. To use residual fitting instead, construct the
+retrieval with `fit_residuals=True` and use `R.preprocessing = []`, because raw
+residuals can be negative.
+
+PICASO is imported lazily, so it is not a required FlopPITy dependency unless
+you use this simulator. `read_PICASO_input` writes temporary FlopPITy
+observation text files from PICASO's `[ObservationData]` block. By default those
+files are written under `[InputOutput].retrieval_output` in the TOML.
+
+The FlopPITy observations use the data-file errors directly. PICASO
+`err_inf.*` priors are ignored because they are likelihood nuisance terms, not
+part of the simulator training data. PICASO `scaling.*` and `offset.*` priors
+are converted to FlopPITy post-processing parameters like `scaling:prism`.
 
 ## Inspecting Results
 
