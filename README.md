@@ -65,20 +65,6 @@ That is the core FlopPITy workflow:
 3. Add parameters with `add_parameter`.
 4. Run with `run`.
 
-To train SBI on residuals instead of the simulated spectra, construct the
-retrieval with `fit_residuals=True`. FlopPITy then uses
-`simulation - observation` as the training feature and conditions the posterior
-on a zero residual:
-
-```python
-R = Retrieval(simulator, fit_residuals=True)
-R.preprocessing = []
-```
-
-Residuals are signed, so this mode cannot be combined with `log` or
-`log_standardize` preprocessing. Use no preprocessing or a transformation that
-supports signed values.
-
 ## Multiple Observations
 
 ```python
@@ -146,11 +132,6 @@ R.parameters = parameters
 
 R.run(simulator_kwargs=PICASO_kwargs)
 ```
-
-For PICASO simulation fitting, plain `log` preprocessing is recommended over
-the default `log_standardize`. To use residual fitting instead, construct the
-retrieval with `fit_residuals=True` and use `R.preprocessing = []`, because raw
-residuals can be negative.
 
 PICASO is imported lazily, so it is not a required FlopPITy dependency unless
 you use this simulator. `read_PICASO_input` writes temporary FlopPITy
