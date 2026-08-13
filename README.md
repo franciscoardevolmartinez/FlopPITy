@@ -65,31 +65,6 @@ That is the core FlopPITy workflow:
 3. Add parameters with `add_parameter`.
 4. Run with `run`.
 
-To train SBI on residuals instead of the simulated spectra, construct the
-retrieval with `fit_residuals=True`. FlopPITy then uses
-`simulation - observation` as the training feature and conditions the posterior
-on a zero residual:
-
-```python
-R = Retrieval(simulator, fit_residuals=True)
-R.preprocessing = []
-```
-
-Residuals are signed, so this mode cannot be combined with `log` or
-`log_standardize` preprocessing. Use no preprocessing or a transformation that
-supports signed values.
-
-For positive emission spectra spanning a large dynamic range, log residuals
-are usually preferable:
-
-```python
-R = Retrieval(simulator, obs_type="emis", fit_residuals=True)
-R.preprocessing = ["log_residual"]
-```
-
-This trains on `log10(simulation) - log10(observation)` and conditions on zero.
-Both arrays are clipped to `emission_flux_floor` before taking the logarithm.
-
 ## Multiple Observations
 
 ```python
