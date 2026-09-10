@@ -99,8 +99,9 @@ R = Retrieval(simulator)
 - `"emis"` or `"emission"` for emission spectra. This is the default.
 - `"trans"` or `"transmission"` for transmission spectra.
 
-For emission retrievals, non-positive observed and simulated values are clipped
-to `1e-12` before log-style preprocessing can encounter them.
+Emission fluxes are preserved by default. When `log_standardize` is selected,
+observed and simulated values below `log_flux_floor` are clipped immediately
+before taking `log10`; the default floor is `1e-20`.
 
 ### Parameters
 
@@ -341,7 +342,7 @@ The main entrypoint is:
 ```python
 R.run(
     n_threads=1,
-    n_samples=2048,
+    n_samples=4096,
     n_samples_init=None,
     resume=False,
     n_rounds=5,
@@ -420,7 +421,7 @@ summary = R.run_ensemble(
     n_members=5,
     output_dir="output_FlopPITy_ensemble",
     n_rounds=5,
-    n_samples=2048,
+    n_samples=4096,
     simulator_kwargs=simulator_kwargs,
 )
 ```
@@ -442,7 +443,7 @@ summary = R.run_ensemble(
     resume=True,
     add_members=True,
     n_rounds=5,
-    n_samples=2048,
+    n_samples=4096,
     simulator_kwargs=simulator_kwargs,
 )
 ```
@@ -460,7 +461,7 @@ summary = R.run_ensemble(
     resume=True,
     extend_rounds=True,
     n_rounds=2,
-    n_samples=2048,
+    n_samples=4096,
     simulator_kwargs=simulator_kwargs,
 )
 ```
@@ -655,16 +656,15 @@ the setup log that no longer exist so you can edit the JSON or pass overrides.
 
 ## Preprocessing
 
-By default, FlopPITy uses the legacy fitted preprocessing:
+By default, FlopPITy does not preprocess spectra and lets SBI apply its own
+configured x z-scoring:
 
 ```python
-R.preprocessing = ["log_standardize"]
+R.preprocessing = []
 ```
 
-This fits a column-wise mean and standard deviation on the first round of
-simulated training spectra after applying `log10`, then applies that same fitted
-transform to all later simulated spectra and to the default observation used for
-posterior conditioning.
+This preserves signed, zero, and negative flux values. Optional preprocessing
+remains available when explicitly requested.
 
 You can override `R.preprocessing` with a list of preprocessing function names
 before running:
@@ -676,9 +676,13 @@ R.preprocessing = ["log", "standardize_1v1"]
 Available preprocessing functions:
 
 - `softclip`: soft-clips values with `x / (1 + abs(x / 100))`.
-- `log`: applies `log10`; all values must be positive.
-- `log_standardize`: applies `log10`, fits column-wise mean/std on first-round
-  simulated spectra, and reuses that transform for models and observations.
+- `log`: clips values to `log_flux_floor` (default `1e-20`) and applies
+  `log10`.
+- `log_standardize`: clips values to `log_flux_floor` (default `1e-20`), applies
+  `log10`, fits column-wise mean/std on first-round simulated spectra, and
+  reuses that transform for models and observations. Configure the floor when
+  constructing the retrieval, for example
+  `Retrieval(..., log_flux_floor=1e-30)`.
 - `standardize_1v1`: standardizes each spectrum independently and appends that
   row's mean and standard deviation.
 - `standardize_global`: column-wise standardization.

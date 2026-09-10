@@ -5,7 +5,9 @@ class LogStandardizer:
     """Fit log10 column-wise standardization and apply it consistently."""
 
     def __init__(self, eps=1e-20):
-        self.eps = eps
+        self.eps = float(eps)
+        if not np.isfinite(self.eps) or self.eps <= 0:
+            raise ValueError("LogStandardizer eps must be finite and positive.")
         self.mean_ = None
         self.std_ = None
 
@@ -32,8 +34,7 @@ class LogStandardizer:
 
     def _log10_array(self, x):
         x_array = self._as_numpy(x)
-        if np.any(x_array <= 0):
-            x_array = np.clip(x_array, self.eps, None)
+        x_array = np.clip(x_array, self.eps, None)
         return np.log10(x_array)
 
     @staticmethod
@@ -154,14 +155,16 @@ def softclip(x):
     scaled_flux = x / (1 + np.abs(x / 100))
     return scaled_flux
 
-def log(x):
+def log(x, eps=None):
     """
     Computes the base-10 logarithm of the input. If the input is a 2D array, computes the
     logarithm element-wise for each value in the array.
 
     Parameters:
     x (float, array-like, or 2D array): The input value(s) for which to compute the base-10 
-                                        logarithm. Must be positive.
+                                        logarithm.
+    eps (float, optional): If provided, clip values to this positive floor before
+                          taking the logarithm. If omitted, inputs must be positive.
 
     Returns:
     float, ndarray, or 2D ndarray: The base-10 logarithm of the input value(s).
@@ -169,10 +172,16 @@ def log(x):
     Raises:
     ValueError: If any input value(s) are not positive.
     """
-    if np.any(x <= 0):
+    x_array = LogStandardizer._as_numpy(x)
+    if eps is None and np.any(x_array <= 0):
         raise ValueError("All input values must be positive to compute the logarithm.")
-    
-    return np.log10(x)
+    if eps is not None:
+        eps = float(eps)
+        if not np.isfinite(eps) or eps <= 0:
+            raise ValueError("log eps must be finite and positive.")
+        x_array = np.clip(x_array, eps, None)
+
+    return LogStandardizer._like_input(np.log10(x_array), x)
 
 def standardize_1v1(x):
     """

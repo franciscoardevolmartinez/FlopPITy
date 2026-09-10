@@ -45,6 +45,7 @@ class Retrieval:
         do_pca=False,
         fit_residuals=False,
         emission_flux_floor=1e-30,
+        log_flux_floor=1e-20,
     ):
         """
         Parameters
@@ -68,17 +69,21 @@ class Retrieval:
             ``preprocessing=["log_residual"]``, train on the log-flux ratio
             ``log10(simulation) - log10(observation)`` instead.
         emission_flux_floor : float, optional
-            Positive floor used for non-positive emission fluxes before
-            log-style preprocessing. Defaults to a tiny value to avoid
-            changing small-flux spectra appreciably.
+            Positive floor used only by explicit log-residual preprocessing.
+        log_flux_floor : float, optional
+            Positive floor applied to simulations and observations immediately
+            before ``log_standardize`` preprocessing.
         """
         self.simulator = simulator
         self.parameters = {}
-        self.preprocessing = ["log_standardize"]
+        self.preprocessing = []
         self.preprocessing_transformers = {}
         self.obs_type = self._normalize_obs_type(obs_type)
         self.fit_residuals = bool(fit_residuals)
         self.emission_flux_floor = float(emission_flux_floor)
+        self.log_flux_floor = self._validate_positive_floor(
+            log_flux_floor, "log_flux_floor"
+        )
         self.completed_rounds = 0
         self.pca_components = (
             100 if do_pca and pca_components is None else pca_components
@@ -116,6 +121,9 @@ class Retrieval:
         self.emission_flux_floor = float(
             getattr(self, "emission_flux_floor", 1e-30)
         )
+        self.log_flux_floor = self._validate_positive_floor(
+            getattr(self, "log_flux_floor", 1e-20), "log_flux_floor"
+        )
 
     @classmethod
     def load(cls, fname):
@@ -140,6 +148,9 @@ class Retrieval:
             obs_type=setup.get("retrieval", {}).get("obs_type") or "emis",
             pca_components=setup.get("retrieval", {}).get("pca_components"),
             fit_residuals=setup.get("retrieval", {}).get("fit_residuals", False),
+            log_flux_floor=setup.get("retrieval", {}).get(
+                "log_flux_floor", 1e-20
+            ),
         )
         retrieval.setup_payload = setup
         retrieval.setup_path = os.fspath(setup_path)
@@ -174,6 +185,13 @@ class Retrieval:
                 "'transmission'."
             )
         return normalized
+
+    @staticmethod
+    def _validate_positive_floor(value, name):
+        floor = float(value)
+        if not np.isfinite(floor) or floor <= 0:
+            raise ValueError(f"{name} must be finite and positive.")
+        return floor
 
     @classmethod
     def run_from_setup(
@@ -325,10 +343,6 @@ class Retrieval:
         self.obs_sources = self._observation_sources(fnames, obs_names=obs_names)
         self.error_inflation = error_inflation
 
-        if self.obs_type == "emis":
-            for obs in self.obs.values():
-                obs[:, 1] = np.maximum(obs[:, 1], self.emission_flux_floor)
-
         self.default_obs = self._concat_obs_values(self.obs).reshape(1, -1)
 
     @staticmethod
@@ -441,10 +455,10 @@ class Retrieval:
     def density_builder(
         self,
         flow="nsf",
-        transforms=8,
+        transforms=10,
         hidden=64,
         blocks=2,
-        bins=5,
+        bins=8,
         dropout=0.05,
         z_score_theta="independent",
         z_score_x="independent",
@@ -526,7 +540,6 @@ class Retrieval:
         self.do_postprocessing()
         self.augment(n_aug)
         self.add_noise()
-        self._clip_emission_arrays(self.noisy_x)
 
         theta_tensor = torch.tensor(self.augmented_thetas, dtype=torch.float32)
         x_tensor = torch.tensor(
@@ -538,7 +551,7 @@ class Retrieval:
     def run(
         self,
         n_threads=1,
-        n_samples=2048,
+        n_samples=4096,
         n_samples_init=None,
         n_agg=1,
         resume=False,
@@ -570,7 +583,8 @@ class Retrieval:
         """
         _ = n_agg
         flow_kwargs = {} if flow_kwargs is None else flow_kwargs
-        training_kwargs = {} if training_kwargs is None else training_kwargs
+        training_kwargs = {} if training_kwargs is None else dict(training_kwargs)
+        training_kwargs.setdefault("use_combined_loss", True)
         simulator_kwargs = {} if simulator_kwargs is None else simulator_kwargs
         save_sbi_data = save_data if save_sbi_data is None else bool(save_sbi_data)
         simulator_kwargs = self._freeze_arcis_input_for_run(simulator_kwargs)
@@ -836,6 +850,7 @@ class Retrieval:
                 "simulator": self._callable_name(self.simulator),
                 "preprocessing": self.preprocessing,
                 "fit_residuals": self.fit_residuals,
+                "log_flux_floor": self.log_flux_floor,
                 "pca_components": getattr(self, "pca_components", None),
                 "pca_fitted": self._pca_is_fitted(),
                 "fit_radius": getattr(self, "fit_radius", False),
@@ -1705,7 +1720,9 @@ class Retrieval:
             if function_name == "log_standardize":
                 transformer = self.preprocessing_transformers.get(function_name)
                 if fit_preprocessing:
-                    transformer = preprocessing.LogStandardizer()
+                    transformer = preprocessing.LogStandardizer(
+                        eps=self.log_flux_floor
+                    )
                     transformer.fit(xnorm)
                     self.preprocessing_transformers[function_name] = transformer
                 if transformer is None:
@@ -1714,6 +1731,9 @@ class Retrieval:
                         "spectra before it can transform observations."
                     )
                 xnorm = transformer.transform(xnorm)
+                continue
+            if function_name == "log":
+                xnorm = preprocessing.log(xnorm, eps=self.log_flux_floor)
                 continue
 
             preprocessing_fun = getattr(preprocessing, function_name)

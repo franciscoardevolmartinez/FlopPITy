@@ -104,15 +104,16 @@ class TestHelpers(unittest.TestCase):
         retrieval = Retrieval(lambda obs, pars: {})
         self.assertEqual(retrieval.obs_type, "emis")
         self.assertFalse(retrieval.fit_residuals)
+        self.assertEqual(retrieval.preprocessing, [])
 
         run_signature = inspect.signature(Retrieval.run)
-        self.assertEqual(run_signature.parameters["n_samples"].default, 2048)
+        self.assertEqual(run_signature.parameters["n_samples"].default, 4096)
         self.assertEqual(run_signature.parameters["n_rounds"].default, 5)
 
         density_signature = inspect.signature(Retrieval.density_builder)
         self.assertEqual(density_signature.parameters["flow"].default, "nsf")
-        self.assertEqual(density_signature.parameters["bins"].default, 5)
-        self.assertEqual(density_signature.parameters["transforms"].default, 8)
+        self.assertEqual(density_signature.parameters["bins"].default, 8)
+        self.assertEqual(density_signature.parameters["transforms"].default, 10)
         self.assertEqual(density_signature.parameters["blocks"].default, 2)
         self.assertEqual(density_signature.parameters["hidden"].default, 64)
         self.assertEqual(density_signature.parameters["dropout"].default, 0.05)
@@ -1276,6 +1277,57 @@ log = false
         ])
         np.testing.assert_allclose(x_tensor.numpy(), expected)
 
+    def test_negative_emission_simulations_are_not_clipped_by_default(self):
+        def negative_simulator(obs, parameters, **kwargs):
+            return {"obs": np.full((len(parameters), 2), -1.0)}
+
+        retrieval = Retrieval(negative_simulator, obs_type="emis")
+        retrieval.obs = {
+            "obs": np.array([[1.0, -2.0, 0.0], [2.0, 3.0, 0.0]]),
+        }
+        retrieval.error_inflation = 0
+        retrieval.parameters = {
+            "level": {
+                "min": 0,
+                "max": 1,
+                "log": False,
+                "post_processing": False,
+                "universal": True,
+            },
+        }
+        retrieval.prior = DummyProposal(0.5)
+
+        _, x = retrieval.generate_training_data(
+            proposal=retrieval.prior,
+            r=0,
+            n_samples=2,
+            n_samples_init=2,
+            sample_prior_method="random",
+            n_threads=1,
+            simulator_kwargs={},
+            n_aug=1,
+            initial_round=True,
+        )
+
+        np.testing.assert_array_equal(x.numpy(), np.full((2, 2), -1.0))
+
+    def test_combined_loss_default_can_be_overridden(self):
+        retrieval = Retrieval(flat_simulator, obs_type="trans")
+
+        with patch.object(
+            retrieval,
+            "_prepare_run",
+            return_value=DummyProposal(0.1),
+        ), patch.object(retrieval, "write_setup_log") as write_setup_log:
+            retrieval.run(
+                n_rounds=0,
+                output_dir="unused",
+                training_kwargs={"use_combined_loss": False},
+            )
+
+        run_config = write_setup_log.call_args.kwargs["run_config"]
+        self.assertFalse(run_config["training_kwargs"]["use_combined_loss"])
+
     def test_run_fits_preprocessing_only_on_first_fresh_round_training_x(self):
         retrieval = Retrieval(flat_simulator, obs_type="trans")
         retrieval.default_obs = np.array([[0.5, 0.5]])
@@ -1309,7 +1361,7 @@ log = false
             patch.object(retrieval, "_save_round_data"), \
             patch.object(retrieval, "_save_sbi_data"), \
             patch.object(retrieval, "do_preprocessing", side_effect=record_preprocessing), \
-            patch.object(retrieval, "train"), \
+            patch.object(retrieval, "train") as train_mock, \
             patch.object(retrieval, "get_posterior", side_effect=lambda: setattr(retrieval, "posterior", DummyProposal(0.9))):
             retrieval.inference = types.SimpleNamespace(
                 _summary={"best_validation_loss": 1.0}
@@ -1327,6 +1379,10 @@ log = false
         )
         np.testing.assert_array_equal(training_calls[0]["x"].numpy(), x_round_1.numpy())
         np.testing.assert_array_equal(training_calls[1]["x"].numpy(), x_round_2.numpy())
+        self.assertEqual(
+            [call.kwargs["use_combined_loss"] for call in train_mock.call_args_list],
+            [True, True],
+        )
 
     def test_mixture_proposal_tracks_per_sample_sources(self):
         from floppity.flappity import _MixtureProposal
@@ -1609,14 +1665,30 @@ log = false
         )
 
     def test_preprocessing_chain_preserves_tensor_output(self):
-        retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval = Retrieval(
+            flat_simulator,
+            obs_type="trans",
+            log_flux_floor=1e-6,
+        )
         retrieval.preprocessing = ["log"]
-        result = retrieval.do_preprocessing(torch.tensor([[1.0, 10.0]]))
+        result = retrieval.do_preprocessing(
+            torch.tensor([[-1.0, 1e-8, 1.0, 10.0]])
+        )
 
         self.assertIsInstance(result, torch.Tensor)
-        np.testing.assert_array_equal(result.numpy(), np.array([[0.0, 1.0]]))
+        np.testing.assert_allclose(
+            result.numpy(), np.array([[-6.0, -6.0, 0.0, 1.0]])
+        )
 
-    def test_default_preprocessing_fits_log10_standardizer_on_models(self):
+    def test_log_preprocessing_uses_floor_for_positive_subfloor_values(self):
+        retrieval = Retrieval(flat_simulator, log_flux_floor=1e-4)
+        retrieval.preprocessing = ["log"]
+
+        result = retrieval.do_preprocessing(np.array([[1e-8, 1e-2]]))
+
+        np.testing.assert_allclose(result, np.array([[-4.0, -2.0]]))
+
+    def test_default_preprocessing_is_identity(self):
         retrieval = Retrieval(flat_simulator, obs_type="trans")
         x = torch.tensor([
             [1.0, 10.0],
@@ -1628,25 +1700,47 @@ log = false
         default = retrieval.do_preprocessing(np.array([[10.0, 100.0]]))
 
         self.assertIsInstance(transformed, torch.Tensor)
-        self.assertIsInstance(
-            retrieval.preprocessing_transformers["log_standardize"],
-            LogStandardizer,
-        )
-        np.testing.assert_allclose(
-            retrieval.preprocessing_transformers["log_standardize"].mean_,
-            np.array([[1.0, 2.0]]),
-        )
-        np.testing.assert_allclose(
-            retrieval.preprocessing_transformers["log_standardize"].std_,
-            np.array([[1.0, 1.0]]),
-        )
-        np.testing.assert_allclose(default, np.array([[0.0, 0.0]]))
+        np.testing.assert_array_equal(transformed.numpy(), x.numpy())
+        np.testing.assert_array_equal(default, np.array([[10.0, 100.0]]))
+        self.assertEqual(retrieval.preprocessing_transformers, {})
 
     def test_log_standardize_requires_training_fit_before_observation(self):
         retrieval = Retrieval(flat_simulator, obs_type="trans")
+        retrieval.preprocessing = ["log_standardize"]
 
         with self.assertRaises(RuntimeError):
             retrieval.do_preprocessing(np.array([[10.0, 100.0]]))
+
+    def test_log_standardize_uses_configured_floor_consistently(self):
+        retrieval = Retrieval(
+            flat_simulator,
+            obs_type="emis",
+            log_flux_floor=1e-6,
+        )
+        retrieval.preprocessing = ["log_standardize"]
+        training = np.array([
+            [-1.0, 1e-8],
+            [1e-7, 1e-4],
+            [1e-5, 1e-2],
+        ])
+
+        transformed = retrieval.do_preprocessing(
+            training, fit_preprocessing=True
+        )
+        observation = retrieval.do_preprocessing(
+            np.array([[1e-9, 1e-9]])
+        )
+        expected_observation = retrieval.preprocessing_transformers[
+            "log_standardize"
+        ].transform(np.array([[1e-6, 1e-6]]))
+
+        self.assertTrue(np.isfinite(transformed).all())
+        np.testing.assert_allclose(observation, expected_observation)
+
+    def test_log_flux_floor_must_be_positive_and_finite(self):
+        for floor in (0.0, -1.0, np.inf, np.nan):
+            with self.assertRaisesRegex(ValueError, "log_flux_floor"):
+                Retrieval(flat_simulator, log_flux_floor=floor)
 
     def test_pca_transformer_reduces_arrays_and_tensors(self):
         x = np.array([
@@ -1700,7 +1794,7 @@ log = false
         self.assertEqual(retrieval.pca_components, 3)
         self.assertTrue(retrieval.do_pca)
 
-    def test_emission_observations_and_noisy_spectra_are_clipped(self):
+    def test_emission_observations_are_not_clipped_by_default(self):
         import tempfile
         import os
 
@@ -1711,13 +1805,9 @@ log = false
             retrieval = Retrieval(flat_simulator, obs_type="emis")
             retrieval.get_obs([obs_path])
 
-        self.assertEqual(retrieval.obs[0][0, 1], 1e-30)
+        self.assertEqual(retrieval.obs[0][0, 1], -5.0)
         self.assertEqual(retrieval.obs[0][0, 0], 1.0)
         self.assertEqual(retrieval.obs[0][0, 2], 0.1)
-
-        arrays = {"obs": np.array([[-1.0, 0.0, 1.0]])}
-        retrieval._clip_emission_arrays(arrays)
-        np.testing.assert_array_equal(arrays["obs"], np.array([[1e-30, 1e-30, 1.0]]))
 
     def test_nearest_power_of_two_rejects_non_positive_samples(self):
         retrieval = Retrieval(flat_simulator, obs_type="trans")
@@ -1757,6 +1847,7 @@ log = false
         self.assertEqual(payload["retrieval"]["obs_type"], "trans")
         self.assertEqual(payload["retrieval"]["simulator"], "test_core.flat_simulator")
         self.assertEqual(payload["retrieval"]["preprocessing"], ["log"])
+        self.assertEqual(payload["retrieval"]["log_flux_floor"], 1e-20)
         self.assertIsNone(payload["retrieval"]["pca_components"])
         self.assertFalse(payload["retrieval"]["pca_fitted"])
         self.assertEqual(payload["retrieval"]["error_inflation"], 2)
@@ -1798,8 +1889,11 @@ log = false
             cloned_obs_path = os.path.join(tmpdir, "observations", "obs1_obs.txt")
             cloned_obs_exists = os.path.exists(cloned_obs_path)
 
-        self.assertEqual(payload["run"]["n_samples"], 2048)
-        self.assertEqual(payload["run"]["training_kwargs"], {})
+        self.assertEqual(payload["run"]["n_samples"], 4096)
+        self.assertEqual(
+            payload["run"]["training_kwargs"],
+            {"use_combined_loss": True},
+        )
         self.assertFalse(payload["run"]["save_posterior_samples"])
         self.assertTrue(cloned_obs_exists)
         self.assertEqual(payload["observations"]["obs1"]["cloned_source"], cloned_obs_path)
@@ -2136,6 +2230,7 @@ log = false
                     "obs_type": "trans",
                     "simulator": "test_core.flat_simulator",
                     "preprocessing": ["log"],
+                    "log_flux_floor": 1e-12,
                     "pca_components": None,
                     "error_inflation": 2,
                     "fit_radius": False,
@@ -2177,6 +2272,7 @@ log = false
         self.assertIs(retrieval.simulator, flat_simulator)
         self.assertEqual(retrieval.obs_type, "trans")
         self.assertEqual(retrieval.preprocessing, ["log"])
+        self.assertEqual(retrieval.log_flux_floor, 1e-12)
         self.assertEqual(retrieval.error_inflation, 2)
         self.assertEqual(list(retrieval.obs), ["obs1"])
         self.assertEqual(retrieval.parameters["level"]["max"], 1.0)
