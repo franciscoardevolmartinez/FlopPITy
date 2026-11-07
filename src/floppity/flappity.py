@@ -455,20 +455,27 @@ class Retrieval:
     def density_builder(
         self,
         flow="nsf",
-        transforms=10,
-        hidden=64,
+        transforms=5,
+        hidden=50,
         blocks=2,
-        bins=8,
-        dropout=0.05,
+        bins=10,
+        dropout=0.0,
         z_score_theta="independent",
         z_score_x="independent",
-        use_batch_norm=True,
+        use_batch_norm=False,
+        bounded_theta=True,
+        bounded_theta_eps=1e-6,
     ):
-        """Build the neural posterior estimator used by SNPE-C."""
+        """Build the neural posterior estimator used by SNPE-C.
+
+        By default, NSF estimators learn pointwise scaled-logit coordinates so
+        their samples obey the finite prior bounds by construction. The public
+        posterior remains expressed in natural parameter units.
+        """
         from sbi.inference import SNPE_C
         from sbi.neural_nets import posterior_nn
 
-        self.density = posterior_nn(
+        density = posterior_nn(
             model=flow,
             num_transforms=transforms,
             hidden_features=hidden,
@@ -479,6 +486,16 @@ class Retrieval:
             z_score_x=z_score_x,
             use_batch_norm=use_batch_norm,
         )
+        if bounded_theta and str(flow).lower() == "nsf":
+            from floppity.bounded_density import scaled_logit_builder
+
+            density = scaled_logit_builder(
+                density,
+                low=self.prior.base_dist.low,
+                high=self.prior.base_dist.high,
+                eps=bounded_theta_eps,
+            )
+        self.density = density
         self.inference = SNPE_C(prior=self.prior, density_estimator=self.density)
 
     def train(self, theta, x, proposal, **kwargs):

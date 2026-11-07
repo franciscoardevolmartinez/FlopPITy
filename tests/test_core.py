@@ -11,6 +11,7 @@ import torch
 from torch.distributions import Normal
 
 from floppity import Retrieval
+from floppity.bounded_density import ScaledLogitDensityEstimator
 from floppity.helpers import (
     create_obs_file,
     convert_cube,
@@ -51,11 +52,87 @@ class DummyProposal:
         return self
 
 
+class DummyUnconstrainedEstimator(torch.nn.Module):
+    """Small conditional standard normal implementing SBI's estimator API."""
+
+    def __init__(self, dimensions=1):
+        super().__init__()
+        self.net = torch.nn.Identity()
+        self.input_shape = torch.Size((dimensions,))
+        self.condition_shape = torch.Size((1,))
+        self.embedding_net = torch.nn.Identity()
+
+    def log_prob(self, input, condition, **kwargs):
+        _ = condition, kwargs
+        return Normal(0, 1).log_prob(input).sum(dim=-1)
+
+    def loss(self, input, condition, **kwargs):
+        return -self.log_prob(input, condition, **kwargs)
+
+    def sample(self, sample_shape, condition, **kwargs):
+        _ = kwargs
+        return torch.zeros(
+            (*sample_shape, condition.shape[0], *self.input_shape),
+            dtype=condition.dtype,
+            device=condition.device,
+        )
+
+    def inverse_transform(self, input, condition):
+        _ = condition
+        return input
+
+
 def flat_simulator(obs, parameters, thread=0, **kwargs):
     return {
         key: np.repeat(parameters[:, :1], len(value[:, 0]), axis=1)
         for key, value in obs.items()
     }
+
+
+class TestScaledLogitDensityEstimator(unittest.TestCase):
+
+    def setUp(self):
+        self.estimator = ScaledLogitDensityEstimator(
+            DummyUnconstrainedEstimator(dimensions=2),
+            low=torch.tensor([-2.0, 10.0]),
+            high=torch.tensor([2.0, 20.0]),
+        )
+        self.condition = torch.zeros((1, 1))
+
+    def test_transform_round_trip_and_samples_stay_inside_bounds(self):
+        theta = torch.tensor([[-1.0, 12.0], [0.5, 19.0]])
+        torch.testing.assert_close(
+            self.estimator.to_natural(self.estimator.to_unconstrained(theta)),
+            theta,
+        )
+
+        samples = self.estimator.sample(torch.Size((32,)), self.condition)
+        self.assertEqual(samples.shape, (32, 1, 2))
+        self.assertTrue(torch.all(samples > self.estimator.low))
+        self.assertTrue(torch.all(samples < self.estimator.high))
+
+    def test_log_prob_includes_scaled_logit_jacobian(self):
+        theta = torch.tensor([[[0.0, 15.0]]])
+        actual = self.estimator.log_prob(theta, self.condition)
+        base_log_prob = 2 * Normal(0, 1).log_prob(torch.tensor(0.0))
+        expected_jacobian = torch.log(torch.tensor(1.0)) + torch.log(
+            torch.tensor(0.4)
+        )
+        torch.testing.assert_close(
+            actual, (base_log_prob + expected_jacobian).reshape(1, 1)
+        )
+
+        loss = self.estimator.loss(theta.squeeze(0), self.condition)
+        torch.testing.assert_close(loss, -actual.squeeze(0))
+
+    def test_log_prob_is_negative_infinity_outside_bounds(self):
+        theta = torch.tensor([[[2.1, 15.0]]])
+        self.assertTrue(torch.isneginf(self.estimator.log_prob(theta, self.condition)))
+
+    def test_nsf_scaled_logit_transform_is_enabled_by_default(self):
+        parameters = inspect.signature(Retrieval.density_builder).parameters
+        self.assertTrue(parameters["bounded_theta"].default)
+        self.assertEqual(parameters["bounded_theta_eps"].default, 1e-6)
 
 
 class TestHelpers(unittest.TestCase):
@@ -112,11 +189,13 @@ class TestHelpers(unittest.TestCase):
 
         density_signature = inspect.signature(Retrieval.density_builder)
         self.assertEqual(density_signature.parameters["flow"].default, "nsf")
-        self.assertEqual(density_signature.parameters["bins"].default, 8)
-        self.assertEqual(density_signature.parameters["transforms"].default, 10)
+        self.assertEqual(density_signature.parameters["bins"].default, 10)
+        self.assertEqual(density_signature.parameters["transforms"].default, 5)
         self.assertEqual(density_signature.parameters["blocks"].default, 2)
-        self.assertEqual(density_signature.parameters["hidden"].default, 64)
-        self.assertEqual(density_signature.parameters["dropout"].default, 0.05)
+        self.assertEqual(density_signature.parameters["hidden"].default, 50)
+        self.assertEqual(density_signature.parameters["dropout"].default, 0.0)
+        self.assertFalse(density_signature.parameters["use_batch_norm"].default)
+        self.assertTrue(density_signature.parameters["bounded_theta"].default)
 
     def test_residual_mode_subtracts_observation_and_targets_zero(self):
         retrieval = Retrieval(

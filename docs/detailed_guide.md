@@ -168,7 +168,7 @@ flow_kwargs = {
     "transforms": 5,
     "hidden": 50,
     "blocks": 2,
-    "bins": 8,
+    "bins": 10,
 }
 
 training_kwargs = {
@@ -515,21 +515,34 @@ same summed spectrum.
 ```python
 flow_kwargs = {
     "flow": "nsf",
-    "transforms": 8,
-    "hidden": 64,
+    "transforms": 5,
+    "hidden": 50,
     "blocks": 2,
-    "bins": 5,
-    "dropout": 0.05,
+    "bins": 10,
+    "dropout": 0.0,
     "z_score_theta": "independent",
     "z_score_x": "independent",
-    "use_batch_norm": True,
+    "use_batch_norm": False,
+    "bounded_theta": True,
+    "bounded_theta_eps": 1e-6,
 }
 ```
 
+For NSF, `bounded_theta=True` is the default. Before building the estimator,
+FlopPITy maps every natural parameter from its prior interval `[low, high]` to
+`logit((theta - low) / (high - low))`. The NSF is trained in that unconstrained
+space, while posterior samples and densities remain exposed in natural units.
+The density includes the exact change-of-variables Jacobian, so this applies
+consistently in both the first-round and sequential SNPE-C losses. Set
+`bounded_theta=False` to recover SBI's unbounded NSF output. Values within
+`bounded_theta_eps` of a boundary are stabilized before taking the training
+logit; this only affects the numerical representation of boundary points.
+
 ### Training Options
 
-`training_kwargs` are passed directly to `sbi`'s `.train(...)` method. When
-omitted, FlopPITy leaves SBI's own training defaults untouched. For example:
+`training_kwargs` are passed directly to `sbi`'s `.train(...)` method. FlopPITy
+sets `use_combined_loss=True` unless explicitly overridden and otherwise leaves
+SBI's training defaults untouched. For example:
 
 ```python
 training_kwargs = {
