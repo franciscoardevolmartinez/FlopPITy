@@ -34,6 +34,199 @@ TRANSIENT_STATE = {
 }
 
 
+class _FullyConnectedEmbedding(torch.nn.Module):
+    """Small MLP used to learn summaries of one observation."""
+
+    def __init__(self, depth, hidden, input_features=None):
+        super().__init__()
+        if input_features is None:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Lazy modules are a new feature under heavy development",
+                )
+                input_layer = torch.nn.LazyLinear(hidden)
+        else:
+            input_layer = torch.nn.Linear(input_features, hidden)
+        layers = [input_layer, torch.nn.SiLU()]
+        for _ in range(depth - 1):
+            layers.extend([torch.nn.Linear(hidden, hidden), torch.nn.SiLU()])
+        self.net = torch.nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class _DilatedResidualBlock(torch.nn.Module):
+    """Position-preserving residual block for local spectral features."""
+
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = torch.nn.Conv1d(
+            channels, channels, kernel_size=5, dilation=2, padding=4
+        )
+        self.norm1 = torch.nn.GroupNorm(8, channels)
+        self.conv2 = torch.nn.Conv1d(
+            channels, channels, kernel_size=5, dilation=2, padding=4
+        )
+        self.norm2 = torch.nn.GroupNorm(8, channels)
+        self.activation = torch.nn.SiLU()
+
+    def forward(self, x):
+        residual = x
+        x = self.activation(self.norm1(self.conv1(x)))
+        x = self.norm2(self.conv2(x))
+        return self.activation(x + residual)
+
+
+class _SpectralCNNEmbedding(torch.nn.Module):
+    """Compact 1D CNN for a single, continuous spectral observation."""
+
+    def __init__(self, wavelengths, channels, pooling_bins, output_features):
+        super().__init__()
+        first, second, third = channels
+        self.conv1 = torch.nn.Conv1d(2, first, kernel_size=9, padding=4)
+        self.norm1 = torch.nn.GroupNorm(4, first)
+        self.conv2 = torch.nn.Conv1d(
+            first, second, kernel_size=7, stride=2, padding=3
+        )
+        self.norm2 = torch.nn.GroupNorm(8, second)
+        self.residual = _DilatedResidualBlock(second)
+        self.conv3 = torch.nn.Conv1d(
+            second, third, kernel_size=5, stride=2, padding=2
+        )
+        self.norm3 = torch.nn.GroupNorm(8, third)
+        self.activation = torch.nn.SiLU()
+        self.pooling_bins = pooling_bins
+        self.projection = torch.nn.Sequential(
+            torch.nn.Linear(2 * third * pooling_bins, output_features),
+            torch.nn.SiLU(),
+            torch.nn.LayerNorm(output_features),
+        )
+        self.register_buffer(
+            "wavelength_coordinate",
+            self._normalized_wavelength_coordinate(wavelengths),
+            persistent=True,
+        )
+
+    @staticmethod
+    def _normalized_wavelength_coordinate(wavelengths):
+        wavelengths = np.asarray(wavelengths, dtype=float).reshape(-1)
+        if np.all(np.isfinite(wavelengths)) and np.all(wavelengths > 0):
+            coordinate = np.log(wavelengths)
+        else:
+            coordinate = np.arange(len(wavelengths), dtype=float)
+        span = np.ptp(coordinate)
+        if span > 0:
+            coordinate = 2 * (coordinate - coordinate.min()) / span - 1
+        else:
+            coordinate = np.zeros_like(coordinate)
+        return torch.as_tensor(coordinate, dtype=torch.float32).reshape(1, 1, -1)
+
+    def forward(self, x):
+        flux = x.unsqueeze(1)
+        coordinate = self.wavelength_coordinate.to(dtype=x.dtype).expand(
+            x.shape[0], -1, -1
+        )
+        x = torch.cat((flux, coordinate), dim=1)
+        x = self.activation(self.norm1(self.conv1(x)))
+        x = self.activation(self.norm2(self.conv2(x)))
+        x = self.residual(x)
+        x = self.activation(self.norm3(self.conv3(x)))
+        average = torch.nn.functional.adaptive_avg_pool1d(x, self.pooling_bins)
+        maximum = torch.nn.functional.adaptive_max_pool1d(x, self.pooling_bins)
+        return self.projection(torch.cat((average, maximum), dim=1).flatten(1))
+
+
+class _SegmentedAutoEmbedding(torch.nn.Module):
+    """Choose an MLP or CNN independently for every observation."""
+
+    def __init__(
+        self,
+        observations,
+        resolving_powers,
+        depth,
+        hidden,
+        channels,
+        pooling_bins,
+        output,
+        mlp_below,
+        cnn_above,
+        resolving_power_cut,
+    ):
+        super().__init__()
+        self.segment_names = tuple(observations)
+        self.segment_lengths = tuple(len(observations[name]) for name in observations)
+        self.branches = torch.nn.ModuleList()
+        self.branch_types = []
+        self.branch_parameter_counts = []
+        self.branch_selection = []
+
+        for name, length in zip(self.segment_names, self.segment_lengths):
+            mlp = _FullyConnectedEmbedding(depth, hidden, input_features=length)
+            cnn = _SpectralCNNEmbedding(
+                observations[name][:, 0], channels, pooling_bins, hidden
+            )
+            mlp_parameters = self._parameter_count(mlp)
+            cnn_parameters = self._parameter_count(cnn)
+            resolving_power = resolving_powers[name]
+            if length < mlp_below:
+                use_mlp = True
+                reason = f"{length} points < {mlp_below}"
+            elif length > cnn_above:
+                use_mlp = False
+                reason = f"{length} points > {cnn_above}"
+            else:
+                use_mlp = resolving_power < resolving_power_cut
+                relation = "<" if use_mlp else ">="
+                reason = (
+                    f"mean R={resolving_power:g} {relation} "
+                    f"{resolving_power_cut:g}"
+                )
+            self.branches.append(mlp if use_mlp else cnn)
+            self.branch_types.append("mlp" if use_mlp else "cnn")
+            self.branch_selection.append(
+                {
+                    "name": name,
+                    "points": length,
+                    "mean_resolving_power": resolving_power,
+                    "selected": "mlp" if use_mlp else "cnn",
+                    "reason": reason,
+                }
+            )
+            self.branch_parameter_counts.append(
+                {"mlp": mlp_parameters, "cnn": cnn_parameters}
+            )
+
+        self.branch_types = tuple(self.branch_types)
+        self.branch_parameter_counts = tuple(self.branch_parameter_counts)
+        self.branch_selection = tuple(self.branch_selection)
+        self.fusion = torch.nn.Sequential(
+            torch.nn.Linear(hidden * len(self.branches), output),
+            torch.nn.SiLU(),
+            torch.nn.LayerNorm(output),
+        )
+
+    @staticmethod
+    def _parameter_count(module):
+        return sum(parameter.numel() for parameter in module.parameters())
+
+    def forward(self, x):
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+        x = x.reshape(x.shape[0], -1)
+        expected = sum(self.segment_lengths)
+        if x.shape[1] != expected:
+            raise ValueError(
+                f"Embedding expected {expected} spectral values, got {x.shape[1]}."
+            )
+        segments = torch.split(x, self.segment_lengths, dim=1)
+        embedded = [
+            branch(segment) for branch, segment in zip(self.branches, segments)
+        ]
+        return self.fusion(torch.cat(embedded, dim=1))
+
+
 class Retrieval:
     """Simulation-based atmospheric retrieval driver."""
 
@@ -90,6 +283,7 @@ class Retrieval:
         )
         self.pca = None
         self.do_pca = self.pca_components is not None
+        self.embedding_config = None
 
     def save(self, fname, **options):
         """Save this retrieval object with cloudpickle."""
@@ -124,6 +318,13 @@ class Retrieval:
         self.log_flux_floor = self._validate_positive_floor(
             getattr(self, "log_flux_floor", 1e-20), "log_flux_floor"
         )
+        self.embedding_config = getattr(self, "embedding_config", None)
+        self.observation_resolving_power = getattr(
+            self, "observation_resolving_power", {}
+        )
+        self.observation_resolving_power_source = getattr(
+            self, "observation_resolving_power_source", {}
+        )
 
     @classmethod
     def load(cls, fname):
@@ -157,13 +358,20 @@ class Retrieval:
         retrieval.setup_run_config = run_config
         retrieval.parameters = copy.deepcopy(setup.get("parameters", {}))
         retrieval.preprocessing = setup.get("retrieval", {}).get("preprocessing")
+        embedding_config = setup.get("retrieval", {}).get("embedding")
+        if embedding_config is not None:
+            retrieval.embedding(**embedding_config)
 
         observation_paths = cls._setup_observation_paths(setup)
+        observation_resolving_power = cls._setup_observation_resolving_power(setup)
         cls._warn_missing_setup_paths(observation_paths, "observation")
         retrieval.get_obs(
             observation_paths,
             error_inflation=setup.get("retrieval", {}).get("error_inflation", 1),
+            resolving_power=observation_resolving_power or None,
         )
+        stored_sources = cls._setup_observation_resolving_power_sources(setup)
+        retrieval.observation_resolving_power_source.update(stored_sources)
         cls._warn_missing_paths_in_value(
             run_config.get("simulator_kwargs", {}),
             context="simulator_kwargs",
@@ -282,6 +490,25 @@ class Retrieval:
             if entry.get("source") is not None
         }
 
+    @staticmethod
+    def _setup_observation_resolving_power(setup):
+        observations = setup.get("observations", {})
+        return {
+            _deserialize_setup_key(key): entry.get("mean_resolving_power")
+            for key, entry in observations.items()
+            if entry.get("mean_resolving_power") is not None
+            and entry.get("mean_resolving_power") > 0
+        }
+
+    @staticmethod
+    def _setup_observation_resolving_power_sources(setup):
+        observations = setup.get("observations", {})
+        return {
+            _deserialize_setup_key(key): entry.get("resolving_power_source", "explicit")
+            for key, entry in observations.items()
+            if entry.get("mean_resolving_power") is not None
+        }
+
     @classmethod
     def _warn_missing_setup_paths(cls, paths, context):
         for key, path in paths.items():
@@ -325,7 +552,13 @@ class Retrieval:
             return [expanded]
         return []
 
-    def get_obs(self, fnames, error_inflation=1, obs_names=None):
+    def get_obs(
+        self,
+        fnames,
+        error_inflation=1,
+        obs_names=None,
+        resolving_power=None,
+    ):
         """Read observation files and store them in ``self.obs``.
 
         Parameters
@@ -338,12 +571,109 @@ class Retrieval:
             noise to simulations.
         obs_names : sequence, optional
             Explicit observation names to use when ``fnames`` is a sequence.
+        resolving_power : mapping or scalar, optional
+            Instrumental resolving power for each observation. Mapping values
+            may be scalars or wavelength-dependent arrays; FlopPITy stores
+            their finite positive mean. A scalar is accepted for a single
+            observation. If omitted, an enabled automatic embedding estimates
+            mean sampling resolution from wavelength spacing and warns that it
+            may differ from instrumental resolving power.
         """
         self.obs = self._read_observations(fnames, obs_names=obs_names)
         self.obs_sources = self._observation_sources(fnames, obs_names=obs_names)
+        (
+            self.observation_resolving_power,
+            self.observation_resolving_power_source,
+        ) = self._resolve_observation_resolving_power(resolving_power)
         self.error_inflation = error_inflation
 
         self.default_obs = self._concat_obs_values(self.obs).reshape(1, -1)
+        if self.embedding_config is not None and not self._pca_enabled():
+            self._ensure_observation_resolving_power()
+
+    def _resolve_observation_resolving_power(self, resolving_power):
+        values = {key: None for key in self.obs}
+        sources = {key: "missing" for key in self.obs}
+        if resolving_power is None:
+            return values, sources
+
+        if hasattr(resolving_power, "items"):
+            unknown = set(resolving_power) - set(self.obs)
+            if unknown:
+                names = ", ".join(repr(key) for key in unknown)
+                raise ValueError(
+                    f"Resolving power was provided for unknown observations: {names}."
+                )
+            supplied = resolving_power
+        elif len(self.obs) == 1:
+            supplied = {next(iter(self.obs)): resolving_power}
+        else:
+            raise ValueError(
+                "resolving_power must be a mapping when loading multiple observations."
+            )
+
+        for key, value in supplied.items():
+            values[key] = self._mean_resolving_power(
+                value,
+                key,
+                expected_length=len(self.obs[key]),
+            )
+            sources[key] = "explicit"
+        return values, sources
+
+    @staticmethod
+    def _mean_resolving_power(value, observation_name, expected_length):
+        array = np.asarray(value, dtype=float).reshape(-1)
+        if array.size not in (1, expected_length):
+            raise ValueError(
+                f"Resolving power for observation {observation_name!r} must be "
+                f"a scalar or contain {expected_length} values."
+            )
+        valid = array[np.isfinite(array) & (array > 0)]
+        if valid.size == 0:
+            raise ValueError(
+                f"Resolving power for observation {observation_name!r} must "
+                "contain a finite positive value."
+            )
+        return float(np.mean(valid))
+
+    def _ensure_observation_resolving_power(self):
+        values = getattr(self, "observation_resolving_power", {})
+        sources = getattr(self, "observation_resolving_power_source", {})
+        for key, observation in self.obs.items():
+            if values.get(key) is not None:
+                continue
+            estimated = self._resolving_power_from_wavelength_spacing(
+                observation[:, 0]
+            )
+            values[key] = estimated
+            sources[key] = "wavelength_spacing"
+            warnings.warn(
+                f"No instrumental resolving power was supplied for observation "
+                f"{key!r}; using mean wavelength-spacing resolution "
+                f"R={estimated:g}. This can differ from instrumental R when "
+                "the spectrum is oversampled or rebinned.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        self.observation_resolving_power = values
+        self.observation_resolving_power_source = sources
+        return values
+
+    @staticmethod
+    def _resolving_power_from_wavelength_spacing(wavelengths):
+        wavelengths = np.asarray(wavelengths, dtype=float).reshape(-1)
+        if wavelengths.size < 2:
+            return 0.0
+        spacing = np.abs(np.gradient(wavelengths))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            resolving_power = np.abs(wavelengths) / spacing
+        valid = resolving_power[
+            np.isfinite(resolving_power) & (resolving_power > 0)
+        ]
+        if valid.size == 0:
+            return 0.0
+        return float(np.mean(valid))
 
     @staticmethod
     def _read_observations(fnames, obs_names=None):
@@ -475,6 +805,7 @@ class Retrieval:
         from sbi.inference import SNPE_C
         from sbi.neural_nets import posterior_nn
 
+        self.embedding_net = self._build_embedding_net()
         density = posterior_nn(
             model=flow,
             num_transforms=transforms,
@@ -485,6 +816,7 @@ class Retrieval:
             z_score_theta=z_score_theta,
             z_score_x=z_score_x,
             use_batch_norm=use_batch_norm,
+            embedding_net=self.embedding_net,
         )
         if bounded_theta and str(flow).lower() == "nsf":
             from floppity.bounded_density import scaled_logit_builder
@@ -497,6 +829,110 @@ class Retrieval:
             )
         self.density = density
         self.inference = SNPE_C(prior=self.prior, density_estimator=self.density)
+
+    def embedding(
+        self,
+        depth=1,
+        hidden=64,
+        channels=(16, 32, 64),
+        pooling_bins=8,
+        output=128,
+        mlp_below=500,
+        cnn_above=1500,
+        resolving_power_cut=1000,
+    ):
+        """Configure an automatic, per-observation spectral embedding.
+
+        Observations shorter than ``mlp_below`` use an MLP, observations longer
+        than ``cnn_above`` use a position-aware 1D CNN, and observations in
+        between use the CNN when their mean resolving power is at least
+        ``resolving_power_cut``. Observation summaries are concatenated and
+        fused to ``output`` features. With PCA, wavelength locality has already
+        been removed, so a single MLP is used instead. The selected embedding is
+        trained jointly with the posterior estimator across SNPE rounds.
+
+        If this method is not called, SBI receives an identity embedding.
+        """
+        depth = self._positive_embedding_integer(depth, "depth")
+        hidden = self._positive_embedding_integer(hidden, "hidden")
+        channels = self._embedding_channels(channels)
+        pooling_bins = self._positive_embedding_integer(
+            pooling_bins, "pooling_bins"
+        )
+        output = self._positive_embedding_integer(output, "output")
+        mlp_below = self._positive_embedding_integer(mlp_below, "mlp_below")
+        cnn_above = self._positive_embedding_integer(cnn_above, "cnn_above")
+        resolving_power_cut = self._validate_positive_floor(
+            resolving_power_cut, "resolving_power_cut"
+        )
+        if mlp_below > cnn_above:
+            raise ValueError("mlp_below cannot be greater than cnn_above.")
+        self.embedding_config = {
+            "depth": depth,
+            "hidden": hidden,
+            "channels": list(channels),
+            "pooling_bins": pooling_bins,
+            "output": output,
+            "mlp_below": mlp_below,
+            "cnn_above": cnn_above,
+            "resolving_power_cut": resolving_power_cut,
+        }
+        if hasattr(self, "obs") and not self._pca_enabled():
+            self._ensure_observation_resolving_power()
+        return self
+
+    @classmethod
+    def _embedding_channels(cls, channels):
+        try:
+            channels = tuple(
+                cls._positive_embedding_integer(value, "channels")
+                for value in channels
+            )
+        except TypeError as exc:
+            raise ValueError(
+                "Embedding channels must contain three integers."
+            ) from exc
+        if len(channels) != 3:
+            raise ValueError(
+                "Embedding channels must contain exactly three integers."
+            )
+        if channels[0] % 4 or channels[1] % 8 or channels[2] % 8:
+            raise ValueError(
+                "Embedding channels must be divisible by (4, 8, 8) for GroupNorm."
+            )
+        return channels
+
+    @staticmethod
+    def _positive_embedding_integer(value, name):
+        if isinstance(value, bool):
+            raise ValueError(f"Embedding {name} must be a positive integer.")
+        try:
+            converted = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Embedding {name} must be a positive integer."
+            ) from exc
+        if converted <= 0 or converted != value:
+            raise ValueError(f"Embedding {name} must be a positive integer.")
+        return converted
+
+    def _build_embedding_net(self):
+        config = getattr(self, "embedding_config", None)
+        if config is None:
+            return torch.nn.Identity()
+        if self._pca_enabled():
+            return _FullyConnectedEmbedding(config["depth"], config["hidden"])
+        observations = getattr(self, "obs", None)
+        if not observations:
+            raise RuntimeError(
+                "Load observations with get_obs() before building the embedding."
+            )
+        resolving_powers = self._ensure_observation_resolving_power()
+        return _SegmentedAutoEmbedding(
+            observations,
+            resolving_powers=resolving_powers,
+            **config,
+        )
 
     def train(self, theta, x, proposal, **kwargs):
         """Append simulations and train the posterior estimator."""
@@ -870,6 +1306,7 @@ class Retrieval:
                 "log_flux_floor": self.log_flux_floor,
                 "pca_components": getattr(self, "pca_components", None),
                 "pca_fitted": self._pca_is_fitted(),
+                "embedding": getattr(self, "embedding_config", None),
                 "fit_radius": getattr(self, "fit_radius", False),
                 "radius_bounds": getattr(self, "radius_bounds", None),
                 "radius_reference": getattr(self, "radius_reference", 1.0),
@@ -897,6 +1334,12 @@ class Retrieval:
                 "source": getattr(self, "obs_sources", {}).get(key),
                 "cloned_source": getattr(self, "cloned_observation_paths", {}).get(key),
                 "shape": list(obs.shape),
+                "mean_resolving_power": getattr(
+                    self, "observation_resolving_power", {}
+                ).get(key),
+                "resolving_power_source": getattr(
+                    self, "observation_resolving_power_source", {}
+                ).get(key),
             }
             if obs.size and obs.ndim == 2 and obs.shape[1] >= 3:
                 entry.update(

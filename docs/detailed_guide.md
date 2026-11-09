@@ -537,6 +537,60 @@ Jacobian in both the first-round and sequential SNPE-C losses. Values within
 `bounded_theta_eps` of a boundary are clipped before taking the logit, so the
 transformation is approximate inside those narrow boundary strips.
 
+### Learned Spectral Embeddings
+
+By default, FlopPITy passes spectra directly to the density estimator through
+SBI's identity embedding. To learn separate summaries for each observation
+and combine them before the posterior estimator, configure the automatic
+embedding before starting the retrieval:
+
+```python
+R.embedding()
+R.run()
+```
+
+The default per-observation selection policy is:
+
+```text
+fewer than 500 points       -> MLP
+500 through 1,500 points    -> MLP when mean R < 1000, otherwise CNN
+more than 1,500 points      -> CNN
+```
+
+Supply instrumental resolving power to `get_obs` as a scalar or a
+wavelength-dependent array for each observation. FlopPITy uses the finite,
+positive mean:
+
+```python
+R.get_obs(
+    {"prism": "prism.txt", "g395h": "g395h.txt"},
+    resolving_power={"prism": 100, "g395h": 2700},
+)
+R.embedding()
+```
+
+When resolving power is missing, FlopPITy estimates the mean sampling
+resolution from `wavelength / abs(wavelength spacing)` and emits a warning.
+This fallback can differ from instrumental resolving power when spectra are
+oversampled or rebinned.
+
+The defaults are an MLP with one 64-unit layer and a position-aware CNN with
+channels `(16, 32, 64)`, kernels `(9, 7, 5)`, a dilated residual block, and
+eight-bin average and maximum pooling. Every observation produces 64 features;
+the separate summaries are concatenated and fused into 128. Separate branches
+prevent convolution across instrument joins or gaps represented as separate
+observation files.
+
+The optional `depth`, `hidden`, `channels`, `pooling_bins`, `output`,
+`mlp_below`, `cnn_above`, and `resolving_power_cut` arguments adjust the
+architectures and selection boundaries. If PCA is enabled, FlopPITy uses one
+MLP over the PCA components because PCA removes wavelength locality and
+observation boundaries. SNPE jointly trains the selected branches, fusion
+layer, and posterior estimator, retaining their weights as simulations
+accumulate across rounds. Treat the embedding as a model choice: compare it
+against the identity baseline on held-out synthetic observations and across
+multiple training seeds.
+
 ### Training Options
 
 `training_kwargs` are passed directly to `sbi`'s `.train(...)` method. FlopPITy

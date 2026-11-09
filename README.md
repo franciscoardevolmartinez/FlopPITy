@@ -65,6 +65,36 @@ That is the core FlopPITy workflow:
 3. Add parameters with `add_parameter`.
 4. Run with `run`.
 
+For spectral observations, an optional learned embedding can compress each
+observation separately before their summaries are combined:
+
+```python
+R.embedding()
+R.run()
+```
+
+The automatic policy uses an MLP below 500 points, a CNN above 1,500 points,
+and the mean resolving power for intermediate observations: MLP below
+`R=1000`, CNN at or above it. Supply instrumental resolving power while loading
+observations, as either a scalar or wavelength-dependent array:
+
+```python
+R.get_obs(
+    {"prism": "prism.txt", "g395h": "g395h.txt"},
+    resolving_power={"prism": 100, "g395h": 2700},
+)
+```
+
+If resolving power is omitted, FlopPITy estimates it from wavelength spacing
+and warns because oversampling or rebinning can make that estimate differ from
+instrumental resolution. Each selected branch produces 64 features and their
+summaries are fused to 128. The branches and fusion layer are trained jointly
+with the NSF and continued across SNPE rounds. With PCA, FlopPITy uses one MLP
+because PCA components no longer preserve wavelength locality.
+
+Without this call, FlopPITy uses SBI's identity embedding and passes the
+processed spectrum directly to the density estimator.
+
 To train SBI on residuals instead of the simulated spectra, construct the
 retrieval with `fit_residuals=True`. FlopPITy then uses
 `simulation - observation` as the training feature and conditions the posterior

@@ -12,6 +12,7 @@ from torch.distributions import Normal
 
 from floppity import Retrieval
 from floppity.bounded_density import ScaledLogitDensityEstimator
+from floppity.flappity import _FullyConnectedEmbedding
 from floppity.helpers import (
     create_obs_file,
     convert_cube,
@@ -182,6 +183,7 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(retrieval.obs_type, "emis")
         self.assertFalse(retrieval.fit_residuals)
         self.assertEqual(retrieval.preprocessing, [])
+        self.assertIsNone(retrieval.embedding_config)
 
         run_signature = inspect.signature(Retrieval.run)
         self.assertEqual(run_signature.parameters["n_samples"].default, 4096)
@@ -196,6 +198,142 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(density_signature.parameters["dropout"].default, 0.0)
         self.assertFalse(density_signature.parameters["use_batch_norm"].default)
         self.assertFalse(density_signature.parameters["bounded_theta"].default)
+
+    def test_embedding_automatically_selects_each_observation_branch(self):
+        retrieval = Retrieval(lambda obs, pars: {})
+        retrieval.obs = {
+            "short": np.column_stack(
+                (np.linspace(1, 2, 17), np.ones(17), np.ones(17))
+            ),
+            "long": np.column_stack(
+                (np.linspace(2, 5, 2500), np.ones(2500), np.ones(2500))
+            ),
+        }
+        retrieval.observation_resolving_power = {"short": 100, "long": 100}
+        retrieval.observation_resolving_power_source = {
+            "short": "explicit",
+            "long": "explicit",
+        }
+
+        result = retrieval.embedding()
+        embedding_net = retrieval._build_embedding_net()
+        embedded = embedding_net(torch.ones((3, 2517)))
+
+        self.assertIs(result, retrieval)
+        self.assertEqual(
+            retrieval.embedding_config,
+            {
+                "depth": 1,
+                "hidden": 64,
+                "channels": [16, 32, 64],
+                "pooling_bins": 8,
+                "output": 128,
+                "mlp_below": 500,
+                "cnn_above": 1500,
+                "resolving_power_cut": 1000.0,
+            },
+        )
+        self.assertEqual(embedding_net.segment_names, ("short", "long"))
+        self.assertEqual(embedding_net.branch_types, ("mlp", "cnn"))
+        self.assertEqual(embedded.shape, (3, 128))
+
+    def test_embedding_uses_length_and_resolving_power_policy(self):
+        retrieval = Retrieval(lambda obs, pars: {})
+        lengths = {
+            "short_high_r": 300,
+            "medium_low_r": 1000,
+            "medium_high_r": 1000,
+            "long_low_r": 1600,
+        }
+        retrieval.obs = {
+            name: np.column_stack(
+                (np.linspace(1, 2, length), np.ones(length), np.ones(length))
+            )
+            for name, length in lengths.items()
+        }
+        retrieval.observation_resolving_power = {
+            "short_high_r": 2700,
+            "medium_low_r": 100,
+            "medium_high_r": 2700,
+            "long_low_r": 100,
+        }
+        retrieval.observation_resolving_power_source = {
+            name: "explicit" for name in lengths
+        }
+
+        embedding_net = retrieval.embedding()._build_embedding_net()
+
+        self.assertEqual(
+            embedding_net.branch_types,
+            ("mlp", "mlp", "cnn", "cnn"),
+        )
+
+    def test_embedding_with_pca_uses_one_mlp(self):
+        retrieval = Retrieval(lambda obs, pars: {}, pca_components=12).embedding()
+        embedding_net = retrieval._build_embedding_net()
+
+        self.assertIsInstance(embedding_net, _FullyConnectedEmbedding)
+        self.assertEqual(embedding_net(torch.ones((3, 12))).shape, (3, 64))
+
+    def test_embedding_rejects_invalid_dimensions(self):
+        retrieval = Retrieval(lambda obs, pars: {})
+
+        for kwargs in (
+            {"depth": 0},
+            {"depth": 1.5},
+            {"hidden": 0},
+            {"hidden": True},
+            {"channels": (16, 32)},
+            {"channels": (15, 32, 64)},
+            {"pooling_bins": 0},
+            {"output": 0},
+            {"mlp_below": 1501, "cnn_above": 1500},
+            {"resolving_power_cut": 0},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                retrieval.embedding(**kwargs)
+
+    def test_density_builder_passes_configured_embedding_to_sbi(self):
+        retrieval = Retrieval(lambda obs, pars: {}).embedding()
+        retrieval.obs = {
+            "spectrum": np.column_stack(
+                (np.linspace(1, 2, 9), np.ones(9), np.ones(9))
+            )
+        }
+        retrieval.observation_resolving_power = {"spectrum": 100}
+        retrieval.observation_resolving_power_source = {"spectrum": "explicit"}
+        retrieval.prior = types.SimpleNamespace(
+            base_dist=types.SimpleNamespace(
+                low=torch.zeros((1, 1)),
+                high=torch.ones((1, 1)),
+            )
+        )
+
+        with patch(
+            "sbi.neural_nets.posterior_nn", return_value="density"
+        ) as builder, patch("sbi.inference.SNPE_C"):
+            retrieval.density_builder()
+
+        embedding_net = builder.call_args.kwargs["embedding_net"]
+        self.assertEqual(embedding_net(torch.ones((4, 9))).shape, (4, 128))
+
+    def test_density_builder_uses_identity_embedding_by_default(self):
+        retrieval = Retrieval(lambda obs, pars: {})
+        retrieval.prior = types.SimpleNamespace(
+            base_dist=types.SimpleNamespace(
+                low=torch.zeros((1, 1)),
+                high=torch.ones((1, 1)),
+            )
+        )
+
+        with patch(
+            "sbi.neural_nets.posterior_nn", return_value="density"
+        ) as builder, patch("sbi.inference.SNPE_C"):
+            retrieval.density_builder()
+
+        self.assertIsInstance(
+            builder.call_args.kwargs["embedding_net"], torch.nn.Identity
+        )
 
     def test_residual_mode_subtracts_observation_and_targets_zero(self):
         retrieval = Retrieval(
@@ -306,6 +444,72 @@ class TestHelpers(unittest.TestCase):
                 retrieval.get_obs([first, second], obs_names=["only_one"])
 
         self.assertEqual(list(retrieval.obs.keys()), ["obs1", "miri"])
+
+    def test_get_obs_averages_explicit_resolving_power(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            obs_path = os.path.join(tmpdir, "obs.txt")
+            np.savetxt(
+                obs_path,
+                np.column_stack(
+                    (np.linspace(1, 2, 4), np.ones(4), np.ones(4))
+                ),
+            )
+            retrieval = Retrieval(lambda obs, pars: {}, obs_type="trans")
+            retrieval.get_obs(
+                {"spectrum": obs_path},
+                resolving_power={"spectrum": [500, 750, 1250, 1500]},
+            )
+
+        self.assertEqual(retrieval.observation_resolving_power["spectrum"], 1000)
+        self.assertEqual(
+            retrieval.observation_resolving_power_source["spectrum"], "explicit"
+        )
+
+    def test_embedding_estimates_missing_resolving_power_with_warning(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            obs_path = os.path.join(tmpdir, "obs.txt")
+            wavelengths = np.linspace(1.0, 1.1, 1000)
+            np.savetxt(
+                obs_path,
+                np.column_stack(
+                    (wavelengths, np.ones(1000), np.ones(1000))
+                ),
+            )
+            retrieval = Retrieval(lambda obs, pars: {}, obs_type="trans")
+            retrieval.get_obs({"spectrum": obs_path})
+
+            with self.assertWarnsRegex(RuntimeWarning, "wavelength-spacing"):
+                embedding_net = retrieval.embedding()._build_embedding_net()
+
+        self.assertGreater(
+            retrieval.observation_resolving_power["spectrum"], 1000
+        )
+        self.assertEqual(
+            retrieval.observation_resolving_power_source["spectrum"],
+            "wavelength_spacing",
+        )
+        self.assertEqual(embedding_net.branch_types, ("cnn",))
+
+    def test_get_obs_rejects_unknown_resolving_power_name(self):
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            obs_path = os.path.join(tmpdir, "obs.txt")
+            np.savetxt(obs_path, np.array([[1.0, 10.0, 0.1]]))
+            retrieval = Retrieval(lambda obs, pars: {}, obs_type="trans")
+
+            with self.assertRaisesRegex(ValueError, "unknown observations"):
+                retrieval.get_obs(
+                    {"spectrum": obs_path},
+                    resolving_power={"typo": 100},
+                )
 
     def test_named_offset_and_scaling_postprocessing(self):
         retrieval = Retrieval(lambda obs, pars: {}, obs_type="trans")
@@ -1908,9 +2112,14 @@ log = false
             )
 
             retrieval = Retrieval(flat_simulator, obs_type="trans")
-            retrieval.get_obs({"obs1": obs_path}, error_inflation=2)
+            retrieval.get_obs(
+                {"obs1": obs_path},
+                error_inflation=2,
+                resolving_power={"obs1": 100},
+            )
             retrieval.add_parameter("level", 0.0, 1.0)
             retrieval.preprocessing = ["log"]
+            retrieval.embedding()
             log_path = retrieval.write_setup_log(
                 tmpdir,
                 run_config={
@@ -1929,9 +2138,28 @@ log = false
         self.assertEqual(payload["retrieval"]["log_flux_floor"], 1e-20)
         self.assertIsNone(payload["retrieval"]["pca_components"])
         self.assertFalse(payload["retrieval"]["pca_fitted"])
+        self.assertEqual(
+            payload["retrieval"]["embedding"],
+            {
+                "depth": 1,
+                "hidden": 64,
+                "channels": [16, 32, 64],
+                "pooling_bins": 8,
+                "output": 128,
+                "mlp_below": 500,
+                "cnn_above": 1500,
+                "resolving_power_cut": 1000.0,
+            },
+        )
         self.assertEqual(payload["retrieval"]["error_inflation"], 2)
         self.assertEqual(payload["observations"]["obs1"]["source"], obs_path)
         self.assertEqual(payload["observations"]["obs1"]["shape"], [2, 3])
+        self.assertEqual(
+            payload["observations"]["obs1"]["mean_resolving_power"], 100
+        )
+        self.assertEqual(
+            payload["observations"]["obs1"]["resolving_power_source"], "explicit"
+        )
         self.assertEqual(payload["observations"]["obs1"]["wavelength_min"], 1.0)
         self.assertEqual(payload["observations"]["obs1"]["wavelength_max"], 2.0)
         self.assertEqual(payload["parameters"]["level"]["min"], 0.0)
@@ -2311,12 +2539,23 @@ log = false
                     "preprocessing": ["log"],
                     "log_flux_floor": 1e-12,
                     "pca_components": None,
+                    "embedding": {
+                        "depth": 3,
+                        "hidden": 48,
+                        "channels": [16, 32, 64],
+                        "pooling_bins": 8,
+                        "output": 64,
+                    },
                     "error_inflation": 2,
                     "fit_radius": False,
                     "radius_reference": 1.0,
                 },
                 "observations": {
-                    "obs1": {"source": obs_path},
+                    "obs1": {
+                        "source": obs_path,
+                        "mean_resolving_power": 100,
+                        "resolving_power_source": "explicit",
+                    },
                 },
                 "parameters": {
                     "level": {
@@ -2352,6 +2591,19 @@ log = false
         self.assertEqual(retrieval.obs_type, "trans")
         self.assertEqual(retrieval.preprocessing, ["log"])
         self.assertEqual(retrieval.log_flux_floor, 1e-12)
+        self.assertEqual(
+            retrieval.embedding_config,
+            {
+                "depth": 3,
+                "hidden": 48,
+                "channels": [16, 32, 64],
+                "pooling_bins": 8,
+                "output": 64,
+                "mlp_below": 500,
+                "cnn_above": 1500,
+                "resolving_power_cut": 1000.0,
+            },
+        )
         self.assertEqual(retrieval.error_inflation, 2)
         self.assertEqual(list(retrieval.obs), ["obs1"])
         self.assertEqual(retrieval.parameters["level"]["max"], 1.0)
