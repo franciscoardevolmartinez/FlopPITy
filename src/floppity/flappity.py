@@ -766,10 +766,29 @@ class Retrieval:
             for key, value in x.items()
         }
 
-    def create_prior(self):
-        """Construct a uniform prior in natural parameter units."""
+    @staticmethod
+    def _resolve_training_device(training_device="auto"):
+        """Resolve automatic neural-network training to an available accelerator."""
+        if training_device is None:
+            training_device = "auto"
+        training_device = str(training_device).lower()
+        if training_device == "auto":
+            if torch.cuda.is_available():
+                return f"cuda:{torch.cuda.current_device()}"
+            if (
+                hasattr(torch.backends, "mps")
+                and torch.backends.mps.is_available()
+            ):
+                return "mps"
+            return "cpu"
+        return str(torch.device(training_device))
+
+    def create_prior(self, training_device="auto"):
+        """Construct a uniform prior on the neural-network training device."""
         from sbi import utils as sbi_utils
 
+        training_device = self._resolve_training_device(training_device)
+        self.training_device = training_device
         self.dims = len(self.parameters)
         low = np.empty((self.dims,))
         high = np.empty((self.dims,))
@@ -778,8 +797,12 @@ class Retrieval:
             high[i] = metadata["max"]
 
         self.prior = sbi_utils.BoxUniform(
-            low=torch.as_tensor(low.reshape(1, -1), dtype=torch.float32),
-            high=torch.as_tensor(high.reshape(1, -1), dtype=torch.float32),
+            low=torch.as_tensor(
+                low.reshape(1, -1), dtype=torch.float32, device=training_device
+            ),
+            high=torch.as_tensor(
+                high.reshape(1, -1), dtype=torch.float32, device=training_device
+            ),
         )
 
     def density_builder(
@@ -795,6 +818,7 @@ class Retrieval:
         use_batch_norm=False,
         bounded_theta=False,
         bounded_theta_eps=1e-6,
+        training_device="auto",
     ):
         """Build the neural posterior estimator used by SNPE-C.
 
@@ -805,6 +829,8 @@ class Retrieval:
         from sbi.inference import SNPE_C
         from sbi.neural_nets import posterior_nn
 
+        training_device = self._resolve_training_device(training_device)
+        self.training_device = training_device
         self.embedding_net = self._build_embedding_net()
         density = posterior_nn(
             model=flow,
@@ -823,12 +849,16 @@ class Retrieval:
 
             density = scaled_logit_builder(
                 density,
-                low=self.prior.base_dist.low,
-                high=self.prior.base_dist.high,
+                low=self.prior.base_dist.low.detach().cpu(),
+                high=self.prior.base_dist.high.detach().cpu(),
                 eps=bounded_theta_eps,
             )
         self.density = density
-        self.inference = SNPE_C(prior=self.prior, density_estimator=self.density)
+        self.inference = SNPE_C(
+            prior=self.prior,
+            density_estimator=self.density,
+            device=training_device,
+        )
 
     def embedding(
         self,
@@ -937,7 +967,9 @@ class Retrieval:
     def train(self, theta, x, proposal, **kwargs):
         """Append simulations and train the posterior estimator."""
         self.posterior_estimator = (
-            self.inference.append_simulations(theta, x, proposal=proposal)
+            self.inference.append_simulations(
+                theta, x, proposal=proposal, data_device="cpu"
+            )
             .train(show_train_summary=True, **kwargs)
         )
 
@@ -1025,6 +1057,7 @@ class Retrieval:
         radius_reference=1.0,
         save_posterior_samples=False,
         save_sbi_data=None,
+        training_device="auto",
     ):
         """
         Run SNPE-C retrieval rounds.
@@ -1061,7 +1094,11 @@ class Retrieval:
             getattr(self, "obs_sources", {})
         )
 
-        proposal = self._prepare_run(resume=resume, flow_kwargs=flow_kwargs)
+        proposal = self._prepare_run(
+            resume=resume,
+            flow_kwargs=flow_kwargs,
+            training_device=training_device,
+        )
         start_round = self.completed_rounds
         self.write_setup_log(
             output_dir,
@@ -1087,6 +1124,7 @@ class Retrieval:
                 "radius_reference": self.radius_reference,
                 "save_posterior_samples": save_posterior_samples,
                 "save_sbi_data": save_sbi_data,
+                "training_device": training_device,
                 "start_round": start_round,
                 "final_round": start_round + n_rounds,
             },
@@ -1383,7 +1421,7 @@ class Retrieval:
             return name
         return str(value)
 
-    def _prepare_run(self, resume, flow_kwargs):
+    def _prepare_run(self, resume, flow_kwargs, training_device="auto"):
         if resume:
             print("Resuming training...")
             self._validate_resume_state()
@@ -1397,10 +1435,14 @@ class Retrieval:
 
         print("Starting training...")
         self.completed_rounds = 0
-        self.create_prior()
+        training_device = self._resolve_training_device(training_device)
+        self.create_prior(training_device=training_device)
         self.proposals = [self.prior]
         self.posteriors = []
-        self.density_builder(**flow_kwargs)
+        self.density_builder(
+            **flow_kwargs,
+            training_device=training_device,
+        )
         return self.prior
 
     def _validate_resume_state(self):

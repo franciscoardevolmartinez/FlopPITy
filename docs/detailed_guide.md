@@ -361,6 +361,7 @@ R.run(
     radius_reference=1.0,
     save_posterior_samples=False,
     save_sbi_data=None,
+    training_device="auto",
 )
 ```
 
@@ -370,6 +371,9 @@ Important options:
 - `n_samples_init`: samples for the first round. Defaults to `n_samples`.
 - `n_samples`: samples for later rounds.
 - `n_threads`: number of Python worker processes for simulator calls.
+- `training_device`: neural-network training device. The default, `"auto"`,
+  uses CUDA when available, then Apple Metal (MPS), and otherwise the CPU.
+  Simulator calls still run in CPU worker processes.
 - `n_aug`: repeats each simulated spectrum with fresh observational noise.
 - `flow_kwargs`: arguments forwarded to `density_builder`.
 - `training_kwargs`: arguments forwarded to `sbi` training.
@@ -590,6 +594,13 @@ layer, and posterior estimator, retaining their weights as simulations
 accumulate across rounds. Treat the embedding as a model choice: compare it
 against the identity baseline on held-out synthetic observations and across
 multiple training seeds.
+
+With the default `training_device="auto"`, the embedding and density estimator
+are moved together to the selected GPU. Simulations and accumulated training
+examples remain in system memory; SBI transfers each training batch to the GPU.
+This avoids storing all simulations from every SNPE round in GPU memory. Set
+`training_device="cpu"` to disable accelerator training or select an explicit
+device such as `training_device="cuda:1"`.
 
 ### Training Options
 

@@ -335,6 +335,55 @@ class TestHelpers(unittest.TestCase):
             builder.call_args.kwargs["embedding_net"], torch.nn.Identity
         )
 
+    def test_training_device_auto_prefers_cuda(self):
+        with patch("torch.cuda.is_available", return_value=True), patch(
+            "torch.cuda.current_device", return_value=2
+        ):
+            device = Retrieval._resolve_training_device("auto")
+
+        self.assertEqual(device, "cuda:2")
+
+    def test_training_device_auto_falls_back_to_cpu(self):
+        with patch("torch.cuda.is_available", return_value=False), patch(
+            "torch.backends.mps.is_available", return_value=False
+        ):
+            device = Retrieval._resolve_training_device("auto")
+
+        self.assertEqual(device, "cpu")
+
+    def test_density_builder_passes_resolved_device_to_sbi(self):
+        retrieval = Retrieval(lambda obs, pars: {})
+        retrieval.prior = types.SimpleNamespace(
+            base_dist=types.SimpleNamespace(
+                low=torch.zeros((1, 1)),
+                high=torch.ones((1, 1)),
+            )
+        )
+
+        with patch(
+            "sbi.neural_nets.posterior_nn", return_value="density"
+        ), patch("sbi.inference.SNPE_C") as inference:
+            retrieval.density_builder(training_device="cpu")
+
+        self.assertEqual(inference.call_args.kwargs["device"], "cpu")
+
+    def test_training_data_stays_on_cpu_while_network_trains(self):
+        retrieval = Retrieval(lambda obs, pars: {})
+        trained = object()
+        trainer = types.SimpleNamespace(train=lambda **kwargs: trained)
+        inference = types.SimpleNamespace()
+
+        def append_simulations(theta, x, **kwargs):
+            inference.append_kwargs = kwargs
+            return trainer
+
+        inference.append_simulations = append_simulations
+        retrieval.inference = inference
+        retrieval.train(torch.zeros((2, 1)), torch.zeros((2, 3)), None)
+
+        self.assertEqual(inference.append_kwargs["data_device"], "cpu")
+        self.assertIs(retrieval.posterior_estimator, trained)
+
     def test_residual_mode_subtracts_observation_and_targets_zero(self):
         retrieval = Retrieval(
             lambda obs, pars: {},
@@ -2186,7 +2235,7 @@ log = false
             with patch.object(retrieval, "create_prior") as create_prior, patch.object(
                 retrieval, "density_builder"
             ):
-                create_prior.side_effect = lambda: setattr(
+                create_prior.side_effect = lambda **_kwargs: setattr(
                     retrieval, "prior", DummyProposal(0.1)
                 )
                 retrieval.run(n_rounds=0, output_dir=tmpdir)
@@ -2201,6 +2250,7 @@ log = false
             payload["run"]["training_kwargs"],
             {"use_combined_loss": True},
         )
+        self.assertEqual(payload["run"]["training_device"], "auto")
         self.assertFalse(payload["run"]["save_posterior_samples"])
         self.assertTrue(cloned_obs_exists)
         self.assertEqual(payload["observations"]["obs1"]["cloned_source"], cloned_obs_path)
