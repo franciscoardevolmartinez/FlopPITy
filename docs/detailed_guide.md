@@ -523,20 +523,19 @@ flow_kwargs = {
     "z_score_theta": "independent",
     "z_score_x": "independent",
     "use_batch_norm": False,
-    "bounded_theta": True,
+    "bounded_theta": False,
     "bounded_theta_eps": 1e-6,
 }
 ```
 
-For NSF, `bounded_theta=True` is the default. Before building the estimator,
-FlopPITy maps every natural parameter from its prior interval `[low, high]` to
-`logit((theta - low) / (high - low))`. The NSF is trained in that unconstrained
-space, while posterior samples and densities remain exposed in natural units.
-The density includes the exact change-of-variables Jacobian, so this applies
-consistently in both the first-round and sequential SNPE-C losses. Set
-`bounded_theta=False` to recover SBI's unbounded NSF output. Values within
-`bounded_theta_eps` of a boundary are stabilized before taking the training
-logit; this only affects the numerical representation of boundary points.
+NSF uses SBI's unbounded output by default. Set `bounded_theta=True` to map every
+natural parameter from its prior interval `[low, high]` to
+`logit((theta - low) / (high - low))` before building the estimator. The NSF is
+then trained in unconstrained space, while posterior samples and densities
+remain exposed in natural units. The density includes the change-of-variables
+Jacobian in both the first-round and sequential SNPE-C losses. Values within
+`bounded_theta_eps` of a boundary are clipped before taking the logit, so the
+transformation is approximate inside those narrow boundary strips.
 
 ### Training Options
 

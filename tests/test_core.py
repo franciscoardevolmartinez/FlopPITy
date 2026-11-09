@@ -129,9 +129,9 @@ class TestScaledLogitDensityEstimator(unittest.TestCase):
         theta = torch.tensor([[[2.1, 15.0]]])
         self.assertTrue(torch.isneginf(self.estimator.log_prob(theta, self.condition)))
 
-    def test_nsf_scaled_logit_transform_is_enabled_by_default(self):
+    def test_nsf_scaled_logit_transform_is_opt_in(self):
         parameters = inspect.signature(Retrieval.density_builder).parameters
-        self.assertTrue(parameters["bounded_theta"].default)
+        self.assertFalse(parameters["bounded_theta"].default)
         self.assertEqual(parameters["bounded_theta_eps"].default, 1e-6)
 
 
@@ -195,7 +195,7 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(density_signature.parameters["hidden"].default, 50)
         self.assertEqual(density_signature.parameters["dropout"].default, 0.0)
         self.assertFalse(density_signature.parameters["use_batch_norm"].default)
-        self.assertTrue(density_signature.parameters["bounded_theta"].default)
+        self.assertFalse(density_signature.parameters["bounded_theta"].default)
 
     def test_residual_mode_subtracts_observation_and_targets_zero(self):
         retrieval = Retrieval(

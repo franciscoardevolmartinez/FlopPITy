@@ -463,13 +463,13 @@ class Retrieval:
         z_score_theta="independent",
         z_score_x="independent",
         use_batch_norm=False,
-        bounded_theta=True,
+        bounded_theta=False,
         bounded_theta_eps=1e-6,
     ):
         """Build the neural posterior estimator used by SNPE-C.
 
-        By default, NSF estimators learn pointwise scaled-logit coordinates so
-        their samples obey the finite prior bounds by construction. The public
+        Set ``bounded_theta=True`` to learn pointwise scaled-logit coordinates
+        so NSF samples obey finite prior bounds by construction. The public
         posterior remains expressed in natural parameter units.
         """
         from sbi.inference import SNPE_C
